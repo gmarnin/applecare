@@ -1,0 +1,26 @@
+i18n_title: applecare.listing.title
+table:
+    -   column: machine.computer_name
+        i18n_header: listing.computername
+        formatter: clientDetail
+        tab_link: applecare
+    -   column: reportdata.serial_number
+        i18n_header: serial
+    -   column: applecare.status
+        i18n_header: applecare.column.status
+    -   column: applecare.description
+        i18n_header: applecare.column.description
+    -   column: applecare.startDateTime
+        i18n_header: applecare.column.startDateTime
+    -   column: applecare.endDateTime
+        i18n_header: applecare.column.endDateTime
+    -   column: applecare.paymentType
+        i18n_header: applecare.column.paymentType
+    -   column: applecare.isRenewable
+        i18n_header: applecare.column.isRenewable
+    -   column: applecare.isCanceled
+        i18n_header: applecare.column.isCanceled
+    -   column: applecare.contractCancelDateTime
+        i18n_header: applecare.column.contractCancelDateTime
+    -   column: applecare.agreementNumber
+        i18n_header: applecare.column.agreementNumber

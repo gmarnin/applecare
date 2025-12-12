@@ -1,0 +1,32 @@
+client_tabs:
+    applecare:
+        view: applecare_tab
+        i18n: applecare.title
+listings:
+    applecare:
+        view: applecare_listing
+        i18n: applecare.listing.title
+reports:
+    applecare:
+        view: applecare_report
+        i18n: applecare.report.title
+widgets:
+    applecare_status:
+        view: applecare_status_widget
+    applecare_paymentType:
+        view: applecare_paymentType_widget
+    applecare_description:
+        view: applecare_description_widget
+    applecare_isRenewable:
+        view: applecare_isRenewable_widget
+    applecare_isCanceled:
+        view: applecare_isCanceled_widget
+    applecare_total:
+        view: applecare_total_detail_widget
+detail_widgets:
+    applecare_detail:
+        view: applecare_detail_widget
+admin_pages:
+    applecare_admin:
+        view: admin_form
+        i18n: applecare.admin.title

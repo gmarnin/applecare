@@ -1,0 +1,25 @@
+0:
+    client: {  }
+    messages: {  }
+1:
+    new_clients: {  }
+    munki: {  }
+    mdm_status: {  }
+    os: {  }
+    cpu_arch: {  }
+2:
+    munki_versions: {  }
+    pending_apple: {  }
+    pending_munki: {  }
+    munki_errors: {  }
+    munki_warnings: {  }
+    pending_removals_munki: {  }
+3:
+    uptime: {  }
+    installed_memory: {  }
+    disk_report: {  }
+4:
+5:
+6:
+display_name: Dashboard
+hotkey: d

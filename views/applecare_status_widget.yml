@@ -1,0 +1,8 @@
+type: scrollbox
+widget_id: applecare-status-scrollbox-widget
+api_url: /module/applecare/get_list/status
+i18n_title: applecare.widget.status_title
+icon: fa-laptop
+listing_link: /show/listing/applecare/applecare
+search_key: label
+badge: count

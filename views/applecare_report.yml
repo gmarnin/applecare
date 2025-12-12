@@ -1,0 +1,6 @@
+row1:
+    applecare_status: {  }
+    applecare_paymentType: {  }
+    applecare_description: {  }
+    applecare_isRenewable: {  }
+    applecare_isCanceled: {  }

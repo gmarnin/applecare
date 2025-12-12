@@ -1,0 +1,42 @@
+{
+    "column": {
+        "status": "Status",
+        "paymentType": "Payment Type",
+        "description": "Description",
+        "startDateTime": "Start Date",
+        "endDateTime": "End Date",
+        "isRenewable": "Renewable",
+        "isCanceled": "Canceled Status",
+        "contractCancelDateTime": "Contract Cancel Date",
+        "agreementNumber": "Agreement Number",
+        "last_updated": "Last AxM sync time"
+    },
+    "listing": {
+        "title": "AppleCare"
+    },
+    "report": {
+        "title": "AppleCare"
+    },
+    "admin": {
+        "title": "Update AppleCare Data"
+    },
+    "title": "AppleCare",
+    "widget_title": "AppleCare Coverage",
+    "total_devices": "Total Devices",
+    "active": "Active Coverage",
+    "expiring_soon": "Expiring Soon (30 days)",
+    "expired": "Expired",
+    "inactive": "Inactive",
+    "sync_now": "Sync Now",
+    "widget": {
+        "status_title": "Status",
+        "paymentType_title": "Payment Type",
+        "description_title": "Description",
+        "startDateTime_title": "Start Date",
+        "endDateTime_title": "End Date",
+        "isRenewable_title": "Renewable",
+        "isCanceled_title": "Canceled Status",
+        "contractCancelDateTime_title": "Contract Cancel Date",
+        "agreementNumber_title": "Agreement Number"
+    }
+}
