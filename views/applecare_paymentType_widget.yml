@@ -2,6 +2,7 @@ type: scrollbox
 widget_id: applecare-paymentType-widget
 api_url: /module/applecare/get_binary_widget/paymentType
 i18n_title: applecare.widget.paymentType_title
+i18n_tooltip: "Shows AppleCare payment types across all devices."
 icon: fa-money
 listing_link: /show/listing/applecare/applecare
 search_key: label

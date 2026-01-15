@@ -2,12 +2,15 @@ type: button
 widget_id: applecare-isRenewable-widget
 api_url: /module/applecare/get_binary_widget/isRenewable
 i18n_title: applecare.widget.isRenewable_title
+i18n_tooltip: "Shows whether AppleCare coverage can be renewed. Blue indicates renewable, yellow indicates not renewable."
 icon: fa-plus-square
 listing_link: /show/listing/applecare/applecare
 buttons:
   - label: 1
     i18n_label: yes
-    class: btn-danger 
+    class: btn-info
+    search_component: isRenewable=1
   - label: 0
     i18n_label: no
-    class: btn-success
+    class: btn-warning
+    search_component: isRenewable=0

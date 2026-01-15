@@ -2,12 +2,16 @@ type: button
 widget_id: applecare-isCanceled-widget
 api_url: /module/applecare/get_binary_widget/isCanceled
 i18n_title: applecare.widget.isCanceled_title
+i18n_tooltip: "Shows whether AppleCare coverage has been canceled. Red indicates canceled, green indicates active."
 icon: fa-ban
 listing_link: /show/listing/applecare/applecare
 buttons:
   - label: 1
     i18n_label: yes
-    class: btn-danger 
+    class: btn-danger
+    search_component: isCanceled=1
   - label: 0
     i18n_label: no
     class: btn-success
+    search_component: isCanceled=0
+  

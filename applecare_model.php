@@ -12,6 +12,22 @@ class Applecare_model extends Eloquent
     protected $fillable = [
         'id',
         'serial_number',
+        'model',
+        'part_number',
+        'product_family',
+        'product_type',
+        'color',
+        'device_capacity',
+        'device_assignment_status',
+        'purchase_source_type',
+        'purchase_source_id',
+        'order_number',
+        'order_date',
+        'added_to_org_date',
+        'released_from_org_date',
+        'wifi_mac_address',
+        'ethernet_mac_address',
+        'bluetooth_mac_address',
         'status',
         'paymentType',
         'description',
@@ -22,6 +38,8 @@ class Applecare_model extends Eloquent
         'contractCancelDateTime',
         'agreementNumber',
         'last_updated',
+        'last_fetched',
+        'sync_in_progress',
     ];
 
     /**
@@ -33,12 +51,18 @@ class Applecare_model extends Eloquent
         'startDateTime' => 'datetime',
         'endDateTime' => 'datetime',
         'contractCancelDateTime' => 'datetime',
+        'order_date' => 'datetime',
+        'added_to_org_date' => 'datetime',
+        'released_from_org_date' => 'datetime',
     ];
 
     /**
      * =====================================
-     * Force display formatting for API/UI
+     * Format dates as ISO for client-side formatting
      * =====================================
+     * 
+     * Returns dates in ISO format (Y-m-d) so moment.js can format
+     * them according to user locale settings on the client side.
      */
     public function toArray()
     {
@@ -48,12 +72,16 @@ class Applecare_model extends Eloquent
             'startDateTime',
             'endDateTime',
             'contractCancelDateTime',
+            'order_date',
+            'added_to_org_date',
+            'released_from_org_date',
             'last_updated',
+            'last_fetched',
         ];
 
         foreach ($dateFields as $field) {
             if (!empty($array[$field])) {
-                $array[$field] = self::formatDate($array[$field]);
+                $array[$field] = self::formatDateToISO($array[$field]);
             }
         }
 
@@ -62,18 +90,21 @@ class Applecare_model extends Eloquent
 
     /**
      * =====================================
-     * Date Formatter (single source of truth)
+     * Date Formatter - Returns ISO format
      * =====================================
      *
+     * Converts dates to ISO format (Y-m-d) for client-side formatting.
+     * Moment.js will handle locale-aware formatting based on user settings.
+     *
      * Converts:
-     *  - ISO-8601 strings
+     *  - ISO-8601 strings (with or without time)
      *  - Y-m-d / Y-m-d H:i:s
      *  - DateTime / Carbon
      *  - numeric timestamps
      *
-     * Into: MM-DD-YYYY
+     * Into: Y-m-d (ISO format for moment.js parsing)
      */
-    private static function formatDate($dateValue)
+    private static function formatDateToISO($dateValue)
     {
         if (empty($dateValue)) {
             return null;
@@ -81,19 +112,27 @@ class Applecare_model extends Eloquent
 
         // DateTime / Carbon
         if ($dateValue instanceof \DateTime || (is_object($dateValue) && method_exists($dateValue, 'format'))) {
-            return $dateValue->format('m-d-Y');
+            return $dateValue->format('Y-m-d');
         }
 
         // Numeric timestamp
         if (is_numeric($dateValue)) {
-            return date('m-d-Y', $dateValue);
+            return date('Y-m-d', $dateValue);
         }
 
-        // String (ISO-8601, Y-m-d, etc.)
+        // String - try to parse and return ISO format
         if (is_string($dateValue)) {
+            // If already in Y-m-d format (with or without time), extract date part
+            // Matches: YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, YYYY-MM-DDTHH:MM:SS, etc.
+            // Database stores as "2020-09-11 00:00:00" format
+            if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $dateValue, $matches)) {
+                return $matches[1]; // Return just the date part (YYYY-MM-DD)
+            }
+            
+            // Try to parse and convert to ISO
             $timestamp = strtotime($dateValue);
             if ($timestamp !== false) {
-                return date('m-d-Y', $timestamp);
+                return date('Y-m-d', $timestamp);
             }
         }
 

@@ -2,6 +2,7 @@ type: scrollbox
 widget_id: applecare-description-widget
 api_url: /module/applecare/get_binary_widget/description
 i18n_title: applecare.widget.description_title
+i18n_tooltip: "Shows AppleCare coverage descriptions across all devices."
 icon: fa-sticky-note-o
 listing_link: /show/listing/applecare/applecare
 search_key: label

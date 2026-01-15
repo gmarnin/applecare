@@ -2,6 +2,7 @@ type: scrollbox
 widget_id: applecare-status-widget
 api_url: /module/applecare/get_binary_widget/status
 i18n_title: applecare.widget.status_title
+i18n_tooltip: "Shows AppleCare coverage status. Green indicates active, yellow indicates expiring soon, red indicates expired."
 icon: fa-check-square
 listing_link: /show/listing/applecare/applecare
 search_key: label

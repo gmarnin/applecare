@@ -6,10 +6,34 @@
         "startDateTime": "Start Date",
         "endDateTime": "End Date",
         "isRenewable": "Renewable",
-        "isCanceled": "Canceled Status",
+        "isCanceled": "Canceled",
         "contractCancelDateTime": "Contract Cancel Date",
         "agreementNumber": "Agreement Number",
-        "last_updated": "Last AxM sync time"
+        "last_updated": "Last AxM update",
+        "last_fetched": "Last fetched",
+        "model": "Model",
+        "part_number": "Part Number",
+        "product_family": "Product Family",
+        "product_type": "Product Type",
+        "color": "Color",
+        "device_capacity": "Device Capacity",
+        "device_assignment_status": "Device Assignment",
+        "purchase_source_type": "Purchase Source Type",
+        "purchase_source_id": "Purchase Source ID",
+        "purchase_source_name": "Reseller",
+        "order_number": "Order Number",
+        "order_date": "Order Date",
+        "added_to_org_date": "Added to Org Date",
+        "released_from_org_date": "Released from Org Date",
+        "wifi_mac_address": "Wi-Fi MAC Address",
+        "ethernet_mac_address": "Ethernet MAC Address",
+        "bluetooth_mac_address": "Bluetooth MAC Address"
+    },
+    "device_info": {
+        "title": "Device Information"
+    },
+    "coverage_info": {
+        "title": "AppleCare Coverage"
     },
     "listing": {
         "title": "AppleCare"
@@ -21,12 +45,14 @@
         "title": "Update AppleCare Data"
     },
     "title": "AppleCare",
-    "widget_title": "AppleCare Coverage",
+    "widget_title": "AppleCare",
+    "widget_tooltip": "Shows AppleCare coverage summary. Green indicates active, yellow indicates expiring soon, red indicates expired.",
     "total_devices": "Total Devices",
-    "active": "Active Coverage",
-    "expiring_soon": "Expiring Soon (30 days)",
+    "active": "Active",
+    "expiring_soon": "Expiring Soon",
+    "expiring_soon_tooltip": "Coverage expires within 30 days",
     "expired": "Expired",
-    "inactive": "Inactive",
+    "inactive": "Expired",
     "sync_now": "Sync Now",
     "widget": {
         "status_title": "Status",
@@ -35,7 +61,7 @@
         "startDateTime_title": "Start Date",
         "endDateTime_title": "End Date",
         "isRenewable_title": "Renewable",
-        "isCanceled_title": "Canceled Status",
+        "isCanceled_title": "Canceled",
         "contractCancelDateTime_title": "Contract Cancel Date",
         "agreementNumber_title": "Agreement Number"
     }

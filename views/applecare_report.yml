@@ -1,7 +1,8 @@
 row1:
-    applecare_status:
-    applecare_paymentType:
-    applecare_description:
+    applecare_total:
+    # applecare_status:
     applecare_isRenewable:
     applecare_isCanceled:
-    applecare_total:
+    applecare_paymentType:
+    applecare_description:
+

@@ -9,6 +9,8 @@ table:
         i18n_header: serial
     -   column: applecare.status
         i18n_header: applecare.column.status
+        formatter: format_applecare_status
+        filter: status_filter
     -   column: applecare.description
         i18n_header: applecare.column.description
     -   column: applecare.startDateTime
@@ -16,15 +18,18 @@ table:
         formatter: format_applecare_DateToMoment
     -   column: applecare.endDateTime
         i18n_header: applecare.column.endDateTime
-        formatter: format_applecare_DateToMoment
+        formatter: format_applecare_endDateTime
     -   column: applecare.paymentType
         i18n_header: applecare.column.paymentType
+        filter: paymentType_filter
     -   column: applecare.isRenewable
         i18n_header: applecare.column.isRenewable
-        formatter: format_applecare_yes_no
+        formatter: format_applecare_isRenewable
+        filter: isRenewable_filter
     -   column: applecare.isCanceled
         i18n_header: applecare.column.isCanceled
-        formatter: format_applecare_yes_no
+        formatter: format_applecare_isCanceled
+        filter: isCanceled_filter
     -   column: applecare.contractCancelDateTime
         i18n_header: applecare.column.contractCancelDateTime
     -   column: applecare.agreementNumber
