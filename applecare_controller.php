@@ -174,26 +174,44 @@ class Applecare_controller extends Module_controller
         
         $config_path = APP_ROOT . '/local/module_configs/applecare_resellers.yml';
         if (!file_exists($config_path)) {
+            error_log('AppleCare: Reseller config file not found at: ' . $config_path);
+            return $reseller_id;
+        }
+        
+        if (!is_readable($config_path)) {
+            error_log('AppleCare: Reseller config file is not readable: ' . $config_path);
             return $reseller_id;
         }
         
         try {
             $config = Yaml::parseFile($config_path);
             
+            if (!is_array($config) || empty($config)) {
+                error_log('AppleCare: Reseller config file is empty or invalid: ' . $config_path);
+                return $reseller_id;
+            }
+            
+            // Normalize keys to strings (handle case where YAML parser returns integer keys)
+            $normalized_config = [];
+            foreach ($config as $key => $value) {
+                $normalized_config[(string)$key] = $value;
+            }
+            
             // Try exact match first
-            if (isset($config[$reseller_id])) {
-                return $config[$reseller_id];
+            if (isset($normalized_config[$reseller_id])) {
+                return $normalized_config[$reseller_id];
             }
             
             // Try case-insensitive match
             $reseller_id_upper = strtoupper($reseller_id);
-            foreach ($config as $key => $value) {
+            foreach ($normalized_config as $key => $value) {
                 if (strtoupper($key) === $reseller_id_upper) {
                     return $value;
                 }
             }
         } catch (\Exception $e) {
-            error_log('AppleCare: Error loading reseller config: ' . $e->getMessage());
+            error_log('AppleCare: Error loading reseller config from ' . $config_path . ': ' . $e->getMessage());
+            error_log('AppleCare: Exception trace: ' . $e->getTraceAsString());
         }
         
         return $reseller_id;
@@ -211,16 +229,38 @@ class Applecare_controller extends Module_controller
         
         $config_path = APP_ROOT . '/local/module_configs/applecare_resellers.yml';
         $config = [];
+        $error = null;
         
-        if (file_exists($config_path)) {
+        if (!file_exists($config_path)) {
+            $error = 'Config file not found at: ' . $config_path;
+            error_log('AppleCare: ' . $error);
+        } elseif (!is_readable($config_path)) {
+            $error = 'Config file is not readable: ' . $config_path;
+            error_log('AppleCare: ' . $error);
+        } else {
             try {
-                $config = Yaml::parseFile($config_path);
+                $parsed_config = Yaml::parseFile($config_path);
+                
+                if (!is_array($parsed_config)) {
+                    $error = 'Config file is not a valid YAML mapping: ' . $config_path;
+                    error_log('AppleCare: ' . $error);
+                } else {
+                    // Normalize keys to strings (handle case where YAML parser returns integer keys)
+                    foreach ($parsed_config as $key => $value) {
+                        $config[(string)$key] = $value;
+                    }
+                }
             } catch (\Exception $e) {
-                error_log('AppleCare: Error loading reseller config: ' . $e->getMessage());
+                $error = 'Error parsing config file: ' . $e->getMessage();
+                error_log('AppleCare: ' . $error . ' (file: ' . $config_path . ')');
             }
         }
         
-        jsonView($config);
+        if ($error) {
+            jsonView(['error' => $error, 'config' => $config]);
+        } else {
+            jsonView($config);
+        }
     }
 
     /**
@@ -1272,6 +1312,35 @@ class Applecare_controller extends Module_controller
                     break; // Use first found
                 }
             }
+        }
+        
+        // Check reseller config file status
+        $config_path = APP_ROOT . '/local/module_configs/applecare_resellers.yml';
+        $data['reseller_config'] = [
+            'exists' => file_exists($config_path),
+            'readable' => is_readable($config_path),
+            'path' => $config_path,
+            'valid' => false,
+            'entry_count' => 0,
+            'error' => null
+        ];
+        
+        if ($data['reseller_config']['exists'] && $data['reseller_config']['readable']) {
+            try {
+                $config = Yaml::parseFile($config_path);
+                if (is_array($config)) {
+                    $data['reseller_config']['valid'] = true;
+                    $data['reseller_config']['entry_count'] = count($config);
+                } else {
+                    $data['reseller_config']['error'] = 'Config file is not a valid YAML mapping';
+                }
+            } catch (\Exception $e) {
+                $data['reseller_config']['error'] = $e->getMessage();
+            }
+        } elseif (!$data['reseller_config']['exists']) {
+            $data['reseller_config']['error'] = 'Config file not found';
+        } elseif (!$data['reseller_config']['readable']) {
+            $data['reseller_config']['error'] = 'Config file is not readable (check permissions)';
         }
         
         jsonView($data);

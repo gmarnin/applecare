@@ -89,6 +89,38 @@
             statusRows += '<tr><th>API URL</th><td><code>' + maskedUrl + '</code></td></tr>';
         }
         
+        // Reseller Config File Status
+        if (data.reseller_config) {
+            var resellerStatus = '';
+            var resellerLabel = 'label-default';
+            
+            if (data.reseller_config.valid) {
+                resellerStatus = '<span class="label label-success">Valid</span> (' + data.reseller_config.entry_count + ' entries)';
+                resellerLabel = 'label-success';
+            } else if (data.reseller_config.exists && data.reseller_config.readable) {
+                resellerStatus = '<span class="label label-warning">Invalid</span>';
+                if (data.reseller_config.error) {
+                    resellerStatus += '<br><small style="color: #dc3545;">' + data.reseller_config.error + '</small>';
+                }
+            } else if (data.reseller_config.exists) {
+                resellerStatus = '<span class="label label-danger">Not Readable</span>';
+                if (data.reseller_config.error) {
+                    resellerStatus += '<br><small style="color: #dc3545;">' + data.reseller_config.error + '</small>';
+                }
+            } else {
+                resellerStatus = '<span class="label label-default">Not Found</span>';
+                if (data.reseller_config.error) {
+                    resellerStatus += '<br><small style="color: #6c757d;">' + data.reseller_config.error + '</small>';
+                }
+            }
+            
+            statusRows += '<tr><th>Reseller Config</th><td>' + resellerStatus;
+            if (data.reseller_config.path) {
+                statusRows += '<br><small style="color: #6c757d;"><code>' + data.reseller_config.path + '</code></small>';
+            }
+            statusRows += '</td></tr>';
+        }
+        
         statusRows += '</tbody></table>';
         $('#AppleCare-System-Status').html(statusRows);
     }).fail(function() {

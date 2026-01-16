@@ -163,26 +163,44 @@ class Applecare_helper
 
         $config_path = APP_ROOT . '/local/module_configs/applecare_resellers.yml';
         if (!file_exists($config_path)) {
+            error_log('AppleCare: Reseller config file not found at: ' . $config_path);
+            return $reseller_id;
+        }
+
+        if (!is_readable($config_path)) {
+            error_log('AppleCare: Reseller config file is not readable: ' . $config_path);
             return $reseller_id;
         }
 
         try {
             $config = Yaml::parseFile($config_path);
             
+            if (!is_array($config) || empty($config)) {
+                error_log('AppleCare: Reseller config file is empty or invalid: ' . $config_path);
+                return $reseller_id;
+            }
+            
+            // Normalize keys to strings (handle case where YAML parser returns integer keys)
+            $normalized_config = [];
+            foreach ($config as $key => $value) {
+                $normalized_config[(string)$key] = $value;
+            }
+            
             // Try exact match first
-            if (isset($config[$reseller_id])) {
-                return $config[$reseller_id];
+            if (isset($normalized_config[$reseller_id])) {
+                return $normalized_config[$reseller_id];
             }
             
             // Try case-insensitive match
             $reseller_id_upper = strtoupper($reseller_id);
-            foreach ($config as $key => $value) {
+            foreach ($normalized_config as $key => $value) {
                 if (strtoupper($key) === $reseller_id_upper) {
                     return $value;
                 }
             }
         } catch (\Exception $e) {
-            error_log('AppleCare: Error loading reseller config: ' . $e->getMessage());
+            error_log('AppleCare: Error loading reseller config from ' . $config_path . ': ' . $e->getMessage());
+            error_log('AppleCare: Exception trace: ' . $e->getTraceAsString());
         }
 
         return $reseller_id;

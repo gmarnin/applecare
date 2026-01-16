@@ -415,6 +415,8 @@ window.reseller_filter = reseller_filter;
 
 // Parse hash parameters for filtering
 var applecareHashParams = {};
+var hashFromHashChange = false; // Track if hash came from hashchange event (widget click)
+
 function parseApplecareHash() {
     applecareHashParams = {};
     var hash = window.location.hash.substring(1);
@@ -429,8 +431,49 @@ function parseApplecareHash() {
         });
     }
 }
-// Parse hash immediately (in case script loads after page)
-parseApplecareHash();
+
+// Clear search state when navigating to the listing without a hash
+// This prevents stale widget searches from persisting between navigations
+function clearApplecareListingSearch() {
+    var clearTable = function() {
+        try {
+            if ($.fn.dataTable.isDataTable('.table')) {
+                var oTable = $('.table').DataTable();
+                if (oTable) {
+                    // Clear global and column searches
+                    oTable.search('');
+                    if (oTable.columns) {
+                        oTable.columns().search('');
+                    }
+                    // Clear search input
+                    var searchInput = $('.dataTables_filter input');
+                    if (searchInput.length > 0) {
+                        searchInput.val('');
+                    }
+                    // Reload to apply cleared filters
+                    if (oTable.ajax && typeof oTable.ajax.reload === 'function') {
+                        oTable.ajax.reload();
+                    }
+                }
+                return true;
+            }
+        } catch (e) {
+            // Ignore and retry
+        }
+        return false;
+    };
+
+    // If DataTable is ready, clear immediately; otherwise retry briefly
+    if (!clearTable()) {
+        var attempts = 0;
+        var checkTable = setInterval(function() {
+            attempts += 1;
+            if (clearTable() || attempts > 20) {
+                clearInterval(checkTable);
+            }
+        }, 100);
+    }
+}
 
 // Function to wrap mr.listingFilter.filter()
 function wrapApplecareFilter() {
@@ -442,20 +485,22 @@ function wrapApplecareFilter() {
             
             // Handle scrollbox widget hash (just a label value, not key=value)
             // If hash exists but no key=value pairs were parsed, treat hash as search value
+            // Only apply if hash looks like a widget hash (short, no spaces)
             var hash = window.location.hash.substring(1);
             if (hash && Object.keys(applecareHashParams).length === 0) {
-                // This is a scrollbox widget hash - decode it and set as search value
                 try {
                     var decodedHash = decodeURIComponent(hash);
-                    // Only set if it's not already set (to allow manual searches)
-                    if (!d.search.value || d.search.value.trim() === '') {
-                        d.search.value = decodedHash;
+                    // Only apply if it looks like a widget hash (short, no spaces)
+                    // This prevents applying manual search hashes
+                    if (decodedHash.length > 0 && decodedHash.length <= 100 && decodedHash.indexOf(' ') === -1) {
+                        // This is a scrollbox widget hash - decode it and set as search value
+                        // Only set if it's not already set (to allow manual searches)
+                        if (!d.search.value || d.search.value.trim() === '') {
+                            d.search.value = decodedHash;
+                        }
                     }
                 } catch(e) {
-                    // If decoding fails, use hash as-is
-                    if (!d.search.value || d.search.value.trim() === '') {
-                        d.search.value = hash;
-                    }
+                    // If decoding fails, ignore it
                 }
             }
             
@@ -645,23 +690,49 @@ $(document).ready(function() {
 
 // Handle hash on initial page load and hash changes
 $(document).on('appReady', function(e, lang) {
-    // Process hash on initial page load
+    // Parse hash (if present)
     parseApplecareHash();
-    
-    // If we're on the listing page and have a hash, wait for DataTable to initialize then reload
+
+    var hash = window.location.hash.substring(1);
+    var referrer = document.referrer || '';
+    var fromApplecareListing = referrer.indexOf('/show/listing/applecare') !== -1;
+
+    // If we're coming from the AppleCare listing and a hash is still present,
+    // treat it as stale and clear it to avoid persisting widget filters
+    if (hash && fromApplecareListing) {
+        history.replaceState(null, null, window.location.pathname);
+        applecareHashParams = {};
+        clearApplecareListingSearch();
+        return;
+    }
+
+    // If no hash, clear any stale search state
+    if (!hash) {
+        applecareHashParams = {};
+        clearApplecareListingSearch();
+        return;
+    }
+
+    // Apply hash filters if hash is present
     if ($('.table').length > 0 && Object.keys(applecareHashParams).length > 0) {
         // Wait for DataTable to be fully initialized
         var checkTable = setInterval(function() {
-            var oTable = $('.table').DataTable();
-            if (oTable && oTable.ajax) {
-                clearInterval(checkTable);
-                // Small delay to ensure everything is ready
-                setTimeout(function() {
-                    oTable.ajax.reload();
-                }, 100);
+            try {
+                if ($.fn.dataTable.isDataTable('.table')) {
+                    var oTable = $('.table').DataTable();
+                    if (oTable && oTable.ajax) {
+                        clearInterval(checkTable);
+                        // Small delay to ensure everything is ready
+                        setTimeout(function() {
+                            oTable.ajax.reload();
+                        }, 100);
+                    }
+                }
+            } catch(e) {
+                // DataTable not ready yet, continue checking
             }
         }, 100);
-        
+
         // Stop checking after 5 seconds
         setTimeout(function() {
             clearInterval(checkTable);
@@ -670,13 +741,39 @@ $(document).on('appReady', function(e, lang) {
 });
 
 // Handle hash changes - reload table when hash changes (when already on listing page)
+// This is triggered by widget clicks, so we preserve and apply the hash
 $(window).on('hashchange', function() {
+    hashFromHashChange = true; // Mark that hash came from hashchange event
     parseApplecareHash();
     // Only reload if we're on the listing page
     if ($('.table').length > 0) {
-        var oTable = $('.table').DataTable();
-        if (oTable) {
-            oTable.ajax.reload();
-        }
+        // Wait for DataTable to be fully initialized before reloading
+        var checkTable = setInterval(function() {
+            try {
+                // Check if DataTable is already initialized
+                if ($.fn.dataTable.isDataTable('.table')) {
+                    var oTable = $('.table').DataTable();
+                    // Check if DataTable has ajax method
+                    if (oTable && typeof oTable.ajax === 'function' && typeof oTable.ajax.reload === 'function') {
+                        clearInterval(checkTable);
+                        // Small delay to ensure everything is ready
+                        setTimeout(function() {
+                            try {
+                                oTable.ajax.reload();
+                            } catch(e) {
+                                // DataTable might not be ready yet, ignore error
+                            }
+                        }, 100);
+                    }
+                }
+            } catch(e) {
+                // DataTable not initialized yet, continue checking
+            }
+        }, 100);
+        
+        // Stop checking after 5 seconds
+        setTimeout(function() {
+            clearInterval(checkTable);
+        }, 5000);
     }
 });

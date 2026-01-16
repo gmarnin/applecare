@@ -93,14 +93,17 @@ The module can translate reseller IDs (from `purchase_source_id`) to readable na
 
 ```yaml
 # Maps purchase_source_id values to readable reseller names
-1A2B3C: 'Reseller Company Name'
-4D5E6F: 'Another Reseller Inc'
-789ABC: 'Example Reseller'
-DEF123: 'Apple Retail Business'
+# Note: Keys must be quoted to ensure proper parsing with PHP 8.1+
+'1A2B3C': 'Reseller Company Name'
+'4D5E6F': 'Another Reseller Inc'
+'789ABC': 'Example Reseller'
+'DEF123': 'Apple Retail Business'
 # Add more reseller mappings as needed
 ```
 
 When configured, reseller names will be displayed instead of IDs in the AppleCare tab and listings. Matching is case-insensitive.
+
+**Important:** All reseller ID keys must be quoted (e.g., `'1A2B3C'` instead of `1A2B3C`) to ensure compatibility with PHP 8.1+ and prevent type mismatch issues.
 
 ### Syncing
 
