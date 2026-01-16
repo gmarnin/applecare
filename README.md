@@ -106,14 +106,7 @@ When configured, reseller names will be displayed instead of IDs in the AppleCar
 
 **Automatic Syncing (Recommended):**
 
-Clients automatically sync their AppleCare data every 10-14 days (randomized) during normal MunkiReport check-ins. The client script (`applecare.sh`) is automatically installed when the module is installed. No manual intervention is required.
-
-**How it works:**
-1. Client script runs during MunkiReport preflight
-2. Maintains a plist file with `next_sync_timestamp` value
-3. When timestamp elapses, script updates plist (triggers check-in)
-4. Server processor detects updated plist and triggers sync
-5. Script sets new random timestamp (10-14 days in future)
+Clients automatically sync their AppleCare data every 10-14 days (randomized) during normal MunkiReport check-ins. 
 
 **Manual Syncing Options:**
 
@@ -128,13 +121,14 @@ Clients automatically sync their AppleCare data every 10-14 days (randomized) du
 The AppleCare admin page (`Admin` → `Update AppleCare data`) includes:
 
 * **System Status Panel**: API URL and Client Assertion configuration status, rate limit setting, masked API URL display
+* **Exclude Existing Records Option**: Checkbox to exclude devices that already have AppleCare records from bulk sync. Useful for syncing only new devices or devices that haven't been synced yet. Device count updates dynamically based on checkbox state.
 * **Sync Progress Tracking**: Real-time progress bar, device counts, color-coded sync output (green: success, yellow: warnings, red: errors), completion summary
-* **Rate Limiting**: 1-second delay between fetches, automatic HTTP 429 handling with `Retry-After` support, configurable via `APPLECARE_RATE_LIMIT`
+* **Rate Limiting**: 3-second delay between fetches, automatic HTTP 429 handling with `Retry-After` support, configurable via `APPLECARE_RATE_LIMIT`
 
 ### Client Detail Page Features
 
 * **AppleCare Tab**: Displays coverage records and device information, "Sync Now" button, "Last fetched" timestamp, links to listings/reports
-* **Detail Widgets**: AppleCare Detail Widget (coverage summary) and AppleCare Total Widget (fleet statistics with filtered listing links)
+* **Detail Widgets**: AppleCare Detail Widget (coverage summary) for device summary tab
 
 ### Table Schema
 
