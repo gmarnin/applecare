@@ -31,6 +31,13 @@ var format_applecare_isCanceled = function(colNumber, row){
     formatBooleanLabel(col, value, 'danger', 'success');
 }
 
+var format_applecare_enrolled_in_dep = function(colNumber, row){
+    var col = $('td:eq('+colNumber+')', row),
+        value = col.text();
+    // enrolled_in_dep: Yes = green (success), No = red (danger)
+    formatBooleanLabel(col, value, 'success', 'danger');
+}
+
 // Helper function to find end date in nearby columns
 var findEndDateInRow = function(colNumber, row) {
     // Try known column offset first (endDateTime is typically 3 columns after status)
@@ -405,6 +412,35 @@ var reseller_filter = function(colNumber, d) {
     // Otherwise, let normal text search work
 }
 
+var enrolled_in_dep_filter = function(colNumber, d) {
+    // Handle hash format (enrolled_in_dep=1 or enrolled_in_dep=0)
+    if(d.search.value.match(/^enrolled_in_dep=1$/))
+    {
+        d.columns[colNumber].search.value = '= 1';
+        d.columns[colNumber].search.regex = false;
+        d.search.value = '';
+    }
+    if(d.search.value.match(/^enrolled_in_dep=0$/))
+    {
+        d.columns[colNumber].search.value = '= 0';
+        d.columns[colNumber].search.regex = false;
+        d.search.value = '';
+    }
+    // Also handle space format (enrolled_in_dep = 1 or enrolled_in_dep = 0)
+    if(d.search.value.match(/^enrolled_in_dep = 1$/))
+    {
+        d.columns[colNumber].search.value = '= 1';
+        d.columns[colNumber].search.regex = false;
+        d.search.value = '';
+    }
+    if(d.search.value.match(/^enrolled_in_dep = 0$/))
+    {
+        d.columns[colNumber].search.value = '= 0';
+        d.columns[colNumber].search.regex = false;
+        d.search.value = '';
+    }
+}
+
 // Export filter functions to global scope (required for YAML configs)
 window.status_filter = status_filter;
 window.paymentType_filter = paymentType_filter;
@@ -412,6 +448,7 @@ window.isRenewable_filter = isRenewable_filter;
 window.isCanceled_filter = isCanceled_filter;
 window.device_assignment_status_filter = device_assignment_status_filter;
 window.reseller_filter = reseller_filter;
+window.enrolled_in_dep_filter = enrolled_in_dep_filter;
 
 // Parse hash parameters for filtering
 var applecareHashParams = {};
@@ -665,6 +702,22 @@ function wrapApplecareFilter() {
                 if(item.name === 'applecare.isCanceled'){
                     // Use = 1 or = 0 format like other modules (boolean fields)
                     d.columns[index].search.value = '= ' + applecareHashParams.isCanceled;
+                    d.columns[index].search.regex = false;
+                    found = true;
+                }
+            });
+            if (found) {
+                // Clear global search when column search is set
+                d.search.value = '';
+            }
+        }
+        
+        if (applecareHashParams.enrolled_in_dep !== undefined && applecareHashParams.enrolled_in_dep !== null) {
+            var found = false;
+            $.each(d.columns, function(index, item){
+                if(item.name === 'mdm_status.enrolled_in_dep'){
+                    // Use = 1 or = 0 format like other modules (boolean fields)
+                    d.columns[index].search.value = '= ' + applecareHashParams.enrolled_in_dep;
                     d.columns[index].search.regex = false;
                     found = true;
                 }

@@ -552,6 +552,45 @@ class Applecare_controller extends Module_controller
                 echo $message . "\n";
             };
         }
+        
+        // Wrap output callback to add elapsed time to relevant messages
+        $originalCallback = $outputCallback;
+        $outputCallback = function($message, $isError = false) use ($originalCallback, $start_time) {
+            // Don't add time prefix to ESTIMATED_TIME control messages
+            if (strpos($message, 'ESTIMATED_TIME:') === 0) {
+                $originalCallback($message, $isError);
+                return;
+            }
+            
+            // Messages that should have elapsed time prefix
+            $timePrefixMessages = [
+                'Processing ',
+                'Rate limit reached',
+                'OK (',
+                'SKIP (',
+                'ERROR (',
+                'Heartbeat:',
+            ];
+            
+            // Check if this message should have elapsed time
+            $shouldAddTime = false;
+            foreach ($timePrefixMessages as $prefix) {
+                if (strpos($message, $prefix) === 0) {
+                    $shouldAddTime = true;
+                    break;
+                }
+            }
+            
+            if ($shouldAddTime) {
+                $elapsed = time() - $start_time;
+                $minutes = floor($elapsed / 60);
+                $seconds = $elapsed % 60;
+                $timePrefix = sprintf('%02d:%02d ', $minutes, $seconds);
+                $message = $timePrefix . $message;
+            }
+            
+            $originalCallback($message, $isError);
+        };
 
         $outputCallback("================================================");
         $outputCallback("AppleCare Sync Tool");
@@ -674,9 +713,11 @@ class Applecare_controller extends Module_controller
         $synced = 0;
         $errors = 0;
         $skipped = 0;
-        $requests_made = 0;
-        $window_start = time();
-        $rate_limit_window = 60; // seconds - default window, may be adjusted by API headers
+        $rate_limit_window = 60; // seconds - moving window size
+        
+        // Moving window: track timestamps of successful API requests
+        // This provides smoother rate limiting than fixed windows
+        $request_timestamps = [];
         
         // Dynamic rate limit tracking (will be updated from API headers if available)
         $current_rate_limit = $default_rate_limit;
@@ -686,7 +727,19 @@ class Applecare_controller extends Module_controller
         $outputCallback("");
         $outputCallback("Starting sync...");
         $outputCallback("Initial rate limit: $default_rate_limit calls per minute (will adjust based on API headers)");
-        $outputCallback("Estimated time: " . ceil($total_devices / $default_rate_limit) . " minutes");
+        
+        // Calculate effective rate limit (80% of configured limit)
+        $effective_rate_limit = (int)($default_rate_limit * 0.8);
+        $outputCallback("Using 80% of rate limit ($effective_rate_limit calls/minute) to allow room for background updates");
+        
+        // Calculate estimated time assuming 8 devices per minute
+        $devices_per_minute = 8;
+        $estimated_minutes = ceil($total_devices / $devices_per_minute);
+        $estimated_seconds = $estimated_minutes * 60;
+        
+        // Send initial estimated time to update header
+        $outputCallback("ESTIMATED_TIME:" . $estimated_seconds . ":" . $total_devices);
+        
         $outputCallback("");
 
         // Use the same sync logic as sync_serial but for all devices
@@ -698,6 +751,15 @@ class Applecare_controller extends Module_controller
             // Skip invalid serials
             if (empty($serial) || strlen($serial) < 8) {
                 $skipped++;
+                // Update estimated time remaining (assuming 8 devices per minute)
+                $devices_per_minute = 8;
+                $remaining_devices = $total_devices - $device_index;
+                if ($remaining_devices > 0) {
+                    $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
+                    $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
+                } else {
+                    $outputCallback("ESTIMATED_TIME:0:0");
+                }
                 continue;
             }
 
@@ -707,6 +769,12 @@ class Applecare_controller extends Module_controller
             if ($now - $last_heartbeat >= 15) {
                 $outputCallback("Heartbeat: Processing device $device_index of $total_devices...");
                 $last_heartbeat = $now;
+                
+                // Update estimated time remaining (assuming 8 devices per minute)
+                $devices_per_minute = 8;
+                $remaining_devices = $total_devices - $device_index;
+                $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
+                $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
                 
                 // Flush output to keep connection alive
                 if (ob_get_level()) {
@@ -718,8 +786,49 @@ class Applecare_controller extends Module_controller
             $outputCallback("Processing $serial... ");
 
             try {
+                // Moving window rate limiting: check BEFORE making requests
+                // Clean up timestamps older than window
+                $now = time();
+                $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+                    return ($now - $timestamp) < $rate_limit_window;
+                });
+                
                 // Get org-specific config for this device (with fallback to default)
                 $device_config = $this->getAppleCareConfig($serial);
+                
+                // Determine effective rate limit (use 80% to allow room for background updates)
+                $base_rate_limit = $device_config ? $device_config['rate_limit'] : $default_rate_limit;
+                if (isset($current_rate_limit) && $current_rate_limit > 0) {
+                    $base_rate_limit = $current_rate_limit;
+                }
+                $effective_rate_limit = (int)($base_rate_limit * 0.8);
+                
+                // Check if making this request would exceed the limit
+                // Account for the fact that we'll add 2 requests (device info + coverage)
+                $requests_in_window = count($request_timestamps);
+                $requests_per_device = 2; // Each device sync makes 2 API calls
+                $projected_requests = $requests_in_window + $requests_per_device;
+                
+                if ($projected_requests > $effective_rate_limit) {
+                    // Would exceed limit - wait for oldest request to expire
+                    $oldest_timestamp = min($request_timestamps);
+                    $time_until_oldest_expires = $rate_limit_window - ($now - $oldest_timestamp);
+                    
+                    if ($time_until_oldest_expires > 0) {
+                        $outputCallback("Rate limit reached ({$requests_in_window}/{$effective_rate_limit}, would be {$projected_requests} with this device). Waiting {$time_until_oldest_expires}s for oldest request to expire...");
+                        sleep($time_until_oldest_expires);
+                        
+                        // Clean up expired timestamps after waiting
+                        $now = time();
+                        $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+                            return ($now - $timestamp) < $rate_limit_window;
+                        });
+                    }
+                }
+                
+                // Start timing for this device (includes API calls + DB save)
+                $device_start_time = microtime(true);
+                
                 if ($device_config) {
                     // Use device-specific config
                     $device_api_url = $device_config['api_url'];
@@ -759,6 +868,15 @@ class Applecare_controller extends Module_controller
                     } else {
                         $outputCallback("SKIP (no config found)");
                         $skipped++;
+                        // Update estimated time remaining (assuming 8 devices per minute)
+                        $devices_per_minute = 8;
+                        $remaining_devices = $total_devices - $device_index;
+                        if ($remaining_devices > 0) {
+                            $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
+                            $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
+                        } else {
+                            $outputCallback("ESTIMATED_TIME:0:0");
+                        }
                         continue;
                     }
                 }
@@ -768,44 +886,32 @@ class Applecare_controller extends Module_controller
                     $wait_time = $result['retry_after'];
                     $outputCallback("Rate limit hit. Waiting {$wait_time}s before continuing...");
                     sleep($wait_time);
-                    // Reset rate limit window after waiting
-                    $requests_made = 0;
-                    $window_start = time();
+                    // Clean up old timestamps after waiting (they're now expired)
+                    $now = time();
+                    $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+                        return ($now - $timestamp) < $rate_limit_window;
+                    });
                     // Retry this device
                     $device_index--; // Decrement to retry same device
                     continue;
                 }
                 
-                // Only count requests towards rate limit if device was successfully synced
-                // Skipped devices (404, no coverage, etc.) don't count towards rate limit
-                if ($result['success']) {
-                    $requests_made += $result['requests'];
-                }
-                
-                // Proactive throttling: Only throttle if we're approaching the limit
-                // Use device-specific rate limit if available, otherwise use default
-                // Note: $current_rate_limit may have been updated from API headers
-                $effective_rate_limit = $device_config ? $device_config['rate_limit'] : $default_rate_limit;
-                
-                // If we got rate limit info from headers, use that instead
-                if (isset($current_rate_limit) && $current_rate_limit > 0) {
-                    $effective_rate_limit = $current_rate_limit;
-                }
-                
-                // Only throttle proactively if we're at 80% of limit (to avoid hitting 429)
-                $throttle_threshold = (int)($effective_rate_limit * 0.8);
-                if ($requests_made >= $throttle_threshold) {
-                    $elapsed = time() - $window_start;
-                    if ($elapsed < $rate_limit_window) {
-                        // Wait until the rate limit window resets
-                        $sleep_time = max(0, $rate_limit_window - $elapsed);
-                        if ($sleep_time > 0) {
-                            $outputCallback("Approaching rate limit ({$requests_made}/{$effective_rate_limit}). Sleeping for {$sleep_time}s...");
-                            sleep($sleep_time);
-                        }
+                // Track requests AFTER they're made
+                // Count ALL API calls that were made - they all consume rate limit quota
+                // All devices except "no config found" make API calls:
+                // - Success: 2 requests (device info + coverage)
+                // - 404: 1-2 requests (device lookup fails at 1st or 2nd call)
+                // - Other errors: 2 requests (both calls attempted)
+                // - No config: 0 requests (never calls syncSingleDevice, handled above with continue)
+                if (isset($result['requests']) && $result['requests'] > 0) {
+                    // Add timestamp for each request made
+                    // Note: syncSingleDevice typically makes 2 requests (device info + coverage)
+                    // But 404s on device lookup only make 1 request
+                    // We track them with the same timestamp since they happen almost simultaneously
+                    $now = time();
+                    for ($i = 0; $i < $result['requests']; $i++) {
+                        $request_timestamps[] = $now;
                     }
-                    $requests_made = 0;
-                    $window_start = time();
                 }
                 
                 if ($result['success']) {
@@ -816,29 +922,47 @@ class Applecare_controller extends Module_controller
                     $skipped++;
                 }
                 
-                // Wait 3 seconds after each fetch (success, 404, or error), but not after "no config found"
-                $should_wait = false;
-                if ($result['success']) {
-                    // Always wait after successful sync
-                    $should_wait = true;
-                } elseif (isset($result['message'])) {
-                    // Wait for 404 and other API responses, but not for "no config found"
-                    if (stripos($result['message'], 'SKIP (no config found)') === 0) {
-                        $should_wait = false;
-                    } else {
-                        // Wait for 404, no coverage, and other API responses
-                        $should_wait = true;
+                // Calculate time taken for this device (API calls + DB save + processing)
+                $device_end_time = microtime(true);
+                $time_took = $device_end_time - $device_start_time;
+                
+                // Don't wait after the last device
+                $remaining_devices = $total_devices - $device_index;
+                if ($remaining_devices > 0) {
+                    // Calculate ideal time per device: 60 seconds / devices_per_minute
+                    // devices_per_minute = effective_rate_limit / requests_per_device
+                    // e.g., 16 requests / 2 requests per device = 8 devices per minute
+                    $devices_per_minute = $effective_rate_limit / $requests_per_device;
+                    $ideal_time_per_device = $rate_limit_window / $devices_per_minute; // e.g., 60/8 = 7.5 seconds
+                    
+                    // Wait the remaining time to reach ideal spacing
+                    $wait_time = $ideal_time_per_device - $time_took;
+                    
+                    // Only wait if we have positive wait time and we're not at the limit
+                    // If we're at the limit, the moving window throttling above handles it
+                    if ($wait_time > 0 && $wait_time < 60) {
+                        usleep((int)($wait_time * 1000000)); // Convert to microseconds
                     }
                 }
                 
-                if ($should_wait) {
-                    sleep(3);
+                // Update estimated time remaining after each device (assuming 8 devices per minute)
+                $devices_per_minute = 8;
+                $remaining_devices = $total_devices - $device_index;
+                if ($remaining_devices > 0) {
+                    $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
+                    $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
+                } else {
+                    // All devices processed
+                    $outputCallback("ESTIMATED_TIME:0:0");
                 }
             } catch (\Exception $e) {
                 $outputCallback("ERROR (" . $e->getMessage() . ")", true);
                 $errors++;
-                // Wait 3 seconds after errors too
-                sleep(3);
+                // On error, clean up timestamps and let moving window handle rate limiting
+                $now = time();
+                $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+                    return ($now - $timestamp) < $rate_limit_window;
+                });
             }
 
             // Flush output periodically for streaming
@@ -1045,6 +1169,52 @@ class Applecare_controller extends Module_controller
             jsonView($out);
             return;
         }
+
+        // Handle enrolled_in_dep from mdm_status table
+        if ($column === 'enrolled_in_dep') {
+            try {
+                $model = new \Model();
+                $filter = get_machine_group_filter('WHERE', 'reportdata');
+                
+                // Build WHERE clause - use AND if filter already has WHERE, otherwise use WHERE
+                $where_clause = '';
+                if (!empty($filter)) {
+                    $where_clause = $filter . ' AND mdm_status.enrolled_in_dep IS NOT NULL';
+                } else {
+                    $where_clause = 'WHERE mdm_status.enrolled_in_dep IS NOT NULL';
+                }
+                
+                // Count distinct devices by enrolled_in_dep status
+                // Join with applecare to respect machine group filter and only show devices with AppleCare data
+                $sql = "SELECT 
+                            mdm_status.enrolled_in_dep AS label,
+                            COUNT(DISTINCT mdm_status.serial_number) AS count
+                        FROM mdm_status
+                        LEFT JOIN reportdata ON mdm_status.serial_number = reportdata.serial_number
+                        LEFT JOIN applecare ON mdm_status.serial_number = applecare.serial_number
+                        " . $where_clause . "
+                        AND applecare.device_assignment_status IS NOT NULL
+                        GROUP BY mdm_status.enrolled_in_dep
+                        ORDER BY count DESC";
+
+                $results = [];
+                foreach ($model->query($sql) as $obj) {
+                    $results[] = [
+                        'label' => (string)$obj->label,
+                        'count' => (int)$obj->count
+                    ];
+                }
+                
+                jsonView($results);
+                return;
+            } catch (\Exception $e) {
+                error_log('AppleCare get_binary_widget error for enrolled_in_dep: ' . $e->getMessage());
+                error_log('AppleCare get_binary_widget error trace: ' . $e->getTraceAsString());
+                jsonView(['error' => 'Failed to retrieve enrolled_in_dep data: ' . $e->getMessage()]);
+                return;
+            }
+        }
+
         jsonView(
             Applecare_model::select($column . ' AS label')
                 ->selectRaw('count(*) AS count')
@@ -1264,6 +1434,14 @@ class Applecare_controller extends Module_controller
                     $data['purchase_source_name'] = $resellerName;
                     $data['purchase_source_id_display'] = $data['purchase_source_id'];
                 }
+            }
+            
+            // Get enrolled_in_dep from mdm_status table
+            $model = new \Model();
+            $sql = "SELECT enrolled_in_dep FROM mdm_status WHERE serial_number = ? LIMIT 1";
+            $result = $model->query($sql, [$serial_number]);
+            if (!empty($result) && isset($result[0]->enrolled_in_dep)) {
+                $data['enrolled_in_dep'] = $result[0]->enrolled_in_dep;
             }
             
             jsonView($data);

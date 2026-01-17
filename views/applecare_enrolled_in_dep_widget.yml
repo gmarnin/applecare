@@ -1,0 +1,16 @@
+type: button
+widget_id: applecare-enrolled-in-dep-widget
+api_url: /module/applecare/get_binary_widget/enrolled_in_dep
+i18n_title: applecare.widget.enrolled_in_dep_title
+i18n_tooltip: "Shows whether devices were enrolled via DEP/ADE. Green indicates enrolled via DEP/ADE, red indicates not enrolled via DEP/ADE."
+icon: fa-mobile
+listing_link: /show/listing/applecare/applecare
+buttons:
+  - label: 1
+    i18n_label: yes
+    class: btn-success
+    search_component: enrolled_in_dep=1
+  - label: 0
+    i18n_label: no
+    class: btn-danger
+    search_component: enrolled_in_dep=0

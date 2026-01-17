@@ -210,14 +210,16 @@ if ($total_devices == 0) {
 }
 
 // API configuration (already loaded from env above)
-$rate_limit_window = 60; // seconds
+$rate_limit_window = 60; // seconds - moving window size
 
 // Sync counters
 $synced = 0;
 $errors = 0;
 $skipped = 0;
-$requests_made = 0;
-$window_start = time();
+
+// Moving window: track timestamps of successful API requests
+// This provides smoother rate limiting than fixed windows
+$request_timestamps = [];
 
 echo "\nStarting sync...\n";
 echo "Rate limit: $rate_limit calls per minute\n";
@@ -232,19 +234,41 @@ foreach ($devices as $device) {
         continue;
     }
 
-    // Check rate limit
-    if ($requests_made >= $rate_limit) {
-        $elapsed = time() - $window_start;
-        if ($elapsed < $rate_limit_window) {
-            $sleep_time = $rate_limit_window - $elapsed;
-            echo "Rate limit reached. Sleeping for {$sleep_time}s...\n";
-            sleep($sleep_time);
+    // Moving window rate limiting: clean up timestamps older than window
+    $now = time();
+    $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+        return ($now - $timestamp) < $rate_limit_window;
+    });
+    
+    // Use 80% of configured rate limit to allow room for background updates
+    $effective_rate_limit = (int)($rate_limit * 0.8);
+    
+    // Check if we need to throttle before making requests
+    $requests_in_window = count($request_timestamps);
+    $requests_per_device = 2; // Each device makes 2 API calls
+    $projected_requests = $requests_in_window + $requests_per_device;
+    
+    if ($projected_requests > $effective_rate_limit) {
+        // Find the oldest request timestamp to determine when we can make another request
+        $oldest_timestamp = min($request_timestamps);
+        $time_until_oldest_expires = $rate_limit_window - ($now - $oldest_timestamp);
+        
+        if ($time_until_oldest_expires > 0) {
+            echo "Rate limit reached ({$requests_in_window}/{$effective_rate_limit}, would be {$projected_requests} with this device). Waiting {$time_until_oldest_expires}s for oldest request to expire...\n";
+            sleep($time_until_oldest_expires);
+            
+            // Clean up expired timestamps after waiting
+            $now = time();
+            $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+                return ($now - $timestamp) < $rate_limit_window;
+            });
         }
-        $requests_made = 0;
-        $window_start = time();
     }
 
     echo "Processing $serial... ";
+
+    // Start timing for this device (includes API calls + DB save)
+    $device_start_time = microtime(true);
 
     try {
         // First, fetch device information
@@ -267,7 +291,11 @@ foreach ($devices as $device) {
         $device_curl_error = curl_error($ch);
         curl_close($ch);
 
-        $requests_made++;
+        // Track request timestamp (count all HTTP responses, they consume rate limit quota)
+        // Only skip if there was a curl error (no HTTP response received)
+        if (!$device_curl_error && $device_http_code > 0) {
+            $request_timestamps[] = time();
+        }
 
         // Extract device information if available
         $device_attrs = [];
@@ -354,7 +382,11 @@ foreach ($devices as $device) {
         $curl_errno = curl_errno($ch);
         curl_close($ch);
 
-        $requests_made++;
+        // Track request timestamp (count all HTTP responses, they consume rate limit quota)
+        // Only skip if there was a curl error (no HTTP response received)
+        if (!$curl_error && $http_code > 0) {
+            $request_timestamps[] = time();
+        }
 
         if ($curl_error) {
             // HTTP/2 errors - retry with exponential backoff
@@ -477,6 +509,25 @@ foreach ($devices as $device) {
     } catch (Exception $e) {
         echo "ERROR (" . $e->getMessage() . ")\n";
         $errors++;
+    }
+    
+    // Calculate time taken for this device (API calls + DB save + processing)
+    $device_end_time = microtime(true);
+    $time_took = $device_end_time - $device_start_time;
+    
+    // Calculate ideal time per device: 60 seconds / devices_per_minute
+    // devices_per_minute = effective_rate_limit / requests_per_device
+    // e.g., 16 requests / 2 requests per device = 8 devices per minute
+    $devices_per_minute = $effective_rate_limit / $requests_per_device;
+    $ideal_time_per_device = $rate_limit_window / $devices_per_minute; // e.g., 60/8 = 7.5 seconds
+    
+    // Wait the remaining time to reach ideal spacing
+    $wait_time = $ideal_time_per_device - $time_took;
+    
+    // Only wait if we have positive wait time and we're not at the limit
+    // If we're at the limit, the moving window throttling above handles it
+    if ($wait_time > 0 && $wait_time < 60) {
+        usleep((int)($wait_time * 1000000)); // Convert to microseconds
     }
 }
 

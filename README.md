@@ -125,8 +125,8 @@ The AppleCare admin page (`Admin` → `Update AppleCare data`) includes:
 
 * **System Status Panel**: API URL and Client Assertion configuration status, rate limit setting, masked API URL display
 * **Exclude Existing Records Option**: Checkbox to exclude devices that already have AppleCare records from bulk sync. Useful for syncing only new devices or devices that haven't been synced yet. Device count updates dynamically based on checkbox state.
-* **Sync Progress Tracking**: Real-time progress bar, device counts, color-coded sync output (green: success, yellow: warnings, red: errors), completion summary
-* **Rate Limiting**: 3-second delay between fetches, automatic HTTP 429 handling with `Retry-After` support, configurable via `APPLECARE_RATE_LIMIT`
+* **Sync Progress Tracking**: Real-time progress bar, device counts, estimated time remaining, color-coded sync output (green: success, yellow: warnings, red: errors), completion summary
+* **Rate Limiting**: Moving window rate limiting (60-second rolling window), uses 80% of configured rate limit to allow room for background updates, automatic HTTP 429 handling with `Retry-After` support, configurable via `APPLECARE_RATE_LIMIT`. The system automatically spaces device syncs to prevent hitting rate limits while maximizing throughput.
 
 ### Client Detail Page Features
 
@@ -184,6 +184,8 @@ Based on [AppleCareCoverage.Attributes](https://developer.apple.com/documentatio
 * Review server error logs for detailed error messages
 
 **Rate limit issues:**
+* The module uses 80% of the configured `APPLECARE_RATE_LIMIT` as the effective rate limit to allow room for background updates
+* Moving window rate limiting ensures smooth operation without hitting limits
 * Increase `APPLECARE_RATE_LIMIT` if you have a higher API quota
 * Run bulk syncs during off-hours
 * Use the CLI script for large syncs to avoid PHP timeout limits

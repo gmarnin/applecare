@@ -33,6 +33,7 @@
             <div class="panel panel-default">
                 <div class="panel-heading">
                     <strong>Sync Output</strong>
+                    <span id="estimated-time-display" class="pull-right" style="font-weight: bold; font-size: 1em; color: #5bc0de !important; background-color: rgba(91, 192, 222, 0.2) !important; padding: 2px 8px !important; border-radius: 3px !important;"></span>
                 </div>
                 <div class="panel-body">
                     <pre id="sync-output" style="white-space:pre-wrap;min-height:120px;max-height:300px;overflow-y:auto;background-color:#f5f5f5;padding:10px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:12px;">Waiting to run…</pre>
@@ -143,11 +144,22 @@
                     text += ' (excluding devices with existing records)';
                 }
                 $deviceCountDisplay.text(text);
+                
+                // Calculate and display estimated time (assuming 8 devices per minute)
+                if (count > 0) {
+                    var devicesPerMinute = 8;
+                    var estimatedSeconds = Math.ceil((count / devicesPerMinute) * 60);
+                    updateEstimatedTime(estimatedSeconds, count);
+                } else {
+                    updateEstimatedTime(0, 0);
+                }
             } else {
                 $deviceCountDisplay.text('Unable to load count');
+                updateEstimatedTime(0, 0);
             }
         }).fail(function() {
             $deviceCountDisplay.text('Unable to load count');
+            updateEstimatedTime(0, 0);
         });
     }
 
@@ -164,6 +176,32 @@
             var percent = Math.round((processedDevices / totalDevices) * 100);
             $('#sync-progress .progress-bar').css('width', percent + '%').attr('aria-valuenow', percent);
             $('#progress-bar-percent').text(processedDevices + '/' + totalDevices + ' (' + percent + '%)');
+            
+            // Update estimated time whenever progress updates (assuming 8 devices per minute)
+            var remainingDevices = totalDevices - processedDevices;
+            if (remainingDevices > 0) {
+                var devicesPerMinute = 8;
+                var estimatedSeconds = Math.ceil((remainingDevices / devicesPerMinute) * 60);
+                updateEstimatedTime(estimatedSeconds, remainingDevices);
+            } else {
+                updateEstimatedTime(0, 0);
+            }
+        }
+    }
+    
+    function updateEstimatedTime(estimatedSeconds, remainingDevices) {
+        if (estimatedSeconds > 0 && remainingDevices > 0) {
+            var minutes = Math.floor(estimatedSeconds / 60);
+            var seconds = estimatedSeconds % 60;
+            var timeText = '';
+            if (minutes > 0) {
+                timeText = minutes + 'm ' + seconds + 's';
+            } else {
+                timeText = seconds + 's';
+            }
+            $('#estimated-time-display').text('Est. remaining: ' + timeText + ' (' + remainingDevices + ' device' + (remainingDevices !== 1 ? 's' : '') + ')');
+        } else {
+            $('#estimated-time-display').text('');
         }
     }
 
@@ -216,6 +254,7 @@
         $('#sync-progress').addClass('hide');
         $('#sync-progress .progress-bar').css('width', '0%').attr('aria-valuenow', 0);
         $('#progress-bar-percent').text('0%');
+        $('#estimated-time-display').text('');
     }
     
     function showCompletionMessage(success, data) {
@@ -319,7 +358,14 @@
             var data = e.data;
             // Unescape newlines
             data = data.replace(/\\n/g, '\n');
-            appendOutput(data);
+            
+            // Remove ESTIMATED_TIME control messages from output (we calculate on frontend now)
+            data = data.replace(/ESTIMATED_TIME:\d+:\d+\n?/g, '');
+            
+            // Only append if there's still content
+            if (data.trim().length > 0) {
+                appendOutput(data);
+            }
             
             // Parse progress information
             // Extract total devices count from "Found X devices" message (appears early)

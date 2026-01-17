@@ -2,6 +2,7 @@ row1:
     applecare_total:
     # applecare_status:
     applecare_device_assignment:
+    applecare_enrolled_in_dep:
     applecare_isRenewable:
     applecare_isCanceled:
     applecare_paymentType:

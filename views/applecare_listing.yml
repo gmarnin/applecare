@@ -18,6 +18,10 @@ table:
         i18n_header: applecare.column.device_assignment_status
         formatter: format_applecare_device_assignment_status
         filter: device_assignment_status_filter
+    -   column: mdm_status.enrolled_in_dep
+        i18n_header: applecare.column.enrolled_in_dep
+        formatter: format_applecare_enrolled_in_dep
+        filter: enrolled_in_dep_filter
     -   column: applecare.description
         i18n_header: applecare.column.description
     -   column: applecare.purchase_source_id

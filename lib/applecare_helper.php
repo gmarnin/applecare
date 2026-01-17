@@ -254,6 +254,7 @@ class Applecare_helper
         $ch = curl_init('https://account.apple.com/auth/oauth2/token');
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => true, // Include headers in response
             CURLOPT_POST => true,
             CURLOPT_HTTPHEADER => [
                 'Host: account.apple.com',
@@ -273,6 +274,12 @@ class Applecare_helper
         $response = curl_exec($ch);
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curl_error = curl_error($ch);
+        
+        // Extract headers before closing handle (same pattern as syncSingleDevice)
+        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $header_size);
+        $body = substr($response, $header_size);
+        
         curl_close($ch);
 
         // Temporary logging for all fetches
@@ -285,18 +292,17 @@ class Applecare_helper
         if ($http_code === 429) {
             // Extract Retry-After header if available
             $retry_after = 60; // Default to 60 seconds
-            $headers = curl_getinfo($ch, CURLINFO_HEADER_TEXT);
             if (preg_match('/Retry-After:\s*(\d+)/i', $headers, $matches)) {
                 $retry_after = (int)$matches[1];
             }
-            throw new \Exception("Failed to get access token: HTTP 429 - Rate limit exceeded. Retry after {$retry_after}s - $response");
+            throw new \Exception("Failed to get access token: HTTP 429 - Rate limit exceeded. Retry after {$retry_after}s - $body");
         }
         
         if ($http_code !== 200) {
-            throw new \Exception("Failed to get access token: HTTP $http_code - $response");
+            throw new \Exception("Failed to get access token: HTTP $http_code - $body");
         }
 
-        $data = json_decode($response, true);
+        $data = json_decode($body, true);
         if (!isset($data['access_token'])) {
             throw new \Exception("No access token in response: $response");
         }
@@ -654,12 +660,8 @@ class Applecare_helper
                                 strpos($error_message, '2006') !== false) {
                                 $retry_count++;
                                 if ($retry_count < $max_retries) {
-                                    try {
-                                        \DB::reconnect();
-                                        usleep(500000); // 0.5 seconds
-                                    } catch (\Exception $reconnect_error) {
-                                        error_log("AppleCare: Failed to reconnect to database: " . $reconnect_error->getMessage());
-                                    }
+                                    // Small delay before retry - Eloquent will automatically reconnect
+                                    usleep(500000); // 0.5 seconds
                                 } else {
                                     error_log("AppleCare: Failed to save device info record after {$max_retries} retries: {$error_message}");
                                     throw $e;
@@ -750,14 +752,8 @@ class Applecare_helper
                         strpos($error_message, '2006') !== false) {
                         $retry_count++;
                         if ($retry_count < $max_retries) {
-                            // Reconnect to database
-                            try {
-                                \DB::reconnect();
-                                // Small delay before retry
-                                usleep(500000); // 0.5 seconds
-                            } catch (\Exception $reconnect_error) {
-                                error_log("AppleCare: Failed to reconnect to database: " . $reconnect_error->getMessage());
-                            }
+                            // Small delay before retry - Eloquent will automatically reconnect
+                            usleep(500000); // 0.5 seconds
                         } else {
                             error_log("AppleCare: Failed to save coverage record after {$max_retries} retries: {$error_message}");
                             throw $e;
