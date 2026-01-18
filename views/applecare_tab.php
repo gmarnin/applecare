@@ -1,14 +1,4 @@
 <div id="applecare-tab"></div>
-<div id="lister" style="font-size: large; float: right;">
-    <a href="/show/listing/applecare/applecare" title="List">
-        <i class="btn btn-default tab-btn fa fa-list-alt"></i>
-    </a>
-</div>
-<div id="report_btn" style="font-size: large; float: right;">
-    <a href="/show/report/applecare/applecare" title="Report">
-        <i class="btn btn-default tab-btn fa fa-bar-chart-o"></i>
-    </a>
-</div>
 <h2><i class="fa fa-medkit"></i> <span data-i18n="applecare.title"></span></h2>
 
 <div style="margin-bottom: 15px;">

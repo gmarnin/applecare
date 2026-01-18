@@ -238,11 +238,6 @@ class Applecare_controller extends Module_controller
      **/
     public function get_reseller_config()
     {
-        if (!$this->authorized()) {
-            jsonView(['error' => 'Not authorized'], 403);
-            return;
-        }
-        
         $config_path = $this->normalizePath(APP_ROOT . '/local/module_configs/applecare_resellers.yml');
         $config = [];
         $error = null;
@@ -1032,11 +1027,6 @@ class Applecare_controller extends Module_controller
      **/
     public function get_binary_widget($column = '')
     {
-        if (!$this->authorized()) {
-            jsonView(['error' => 'Not authorized'], 403);
-            return;
-        }
-
         // Handle purchase_source_name specially - need to translate purchase_source_id to names
         if ($column === 'purchase_source_name') {
             try {

@@ -1,5 +1,5 @@
 <div class="col-lg-4">
-    <h4><i class="fa fa-medkit"></i> <span data-i18n="applecare.title"></span><a data-toggle="tab" title="AppleCare" class="btn btn-xs pull-right" href="#applecare" aria-expanded="false"><i class="fa fa-arrow-right"></i></a></h4>
+    <h4><i class="fa fa-medkit"></i> <span data-i18n="applecare.title"></span></h4>
     <table id="applecare_status-data" class="table"></table>
 </div>
 

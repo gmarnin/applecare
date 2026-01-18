@@ -3,9 +3,11 @@ row1:
     # applecare_status:
     applecare_device_assignment:
     applecare_enrolled_in_dep:
+row2:
     applecare_isRenewable:
     applecare_isCanceled:
     applecare_paymentType:
+row3:
     applecare_description:
     applecare_reseller:
 
