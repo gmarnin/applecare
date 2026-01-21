@@ -83,7 +83,7 @@ class Applecare_helper
     {
         $api_url = null;
         $client_assertion = null;
-        $rate_limit = 20;
+        $rate_limit = 40;
 
         // Try machine group key prefix first
         $mg_key = $this->getMachineGroupKey($serial_number);
@@ -143,7 +143,7 @@ class Applecare_helper
         }
         $default_rate_limit = getenv('APPLECARE_RATE_LIMIT');
         if (!empty($default_rate_limit)) {
-            $rate_limit = (int)$default_rate_limit ?: 20;
+            $rate_limit = (int)$default_rate_limit ?: 40;
         }
 
         if (empty($api_url) || empty($client_assertion)) {
@@ -417,9 +417,9 @@ class Applecare_helper
                         'order_date' => null,
                         'added_to_org_date' => null,
                         'released_from_org_date' => null,
-                        'wifi_mac_address' => $device_attrs['wifiMacAddress'] ?? null,
+                        'wifi_mac_address' => null,
                         'ethernet_mac_address' => null,
-                        'bluetooth_mac_address' => $device_attrs['bluetoothMacAddress'] ?? null,
+                        'bluetooth_mac_address' => null,
                     ];
                     
                     // Handle dates
@@ -433,9 +433,21 @@ class Applecare_helper
                         $device_info['released_from_org_date'] = date('Y-m-d H:i:s', strtotime($device_attrs['releasedFromOrgDateTime']));
                     }
                     
-                    // Handle array fields
-                    if (!empty($device_attrs['ethernetMacAddress']) && is_array($device_attrs['ethernetMacAddress'])) {
-                        $device_info['ethernet_mac_address'] = implode(', ', array_filter($device_attrs['ethernetMacAddress']));
+                    // Handle MAC address array fields (API 1.5+ returns arrays for all MAC addresses)
+                    if (!empty($device_attrs['wifiMacAddress'])) {
+                        $device_info['wifi_mac_address'] = is_array($device_attrs['wifiMacAddress']) 
+                            ? implode(', ', array_filter($device_attrs['wifiMacAddress'])) 
+                            : $device_attrs['wifiMacAddress'];
+                    }
+                    if (!empty($device_attrs['bluetoothMacAddress'])) {
+                        $device_info['bluetooth_mac_address'] = is_array($device_attrs['bluetoothMacAddress']) 
+                            ? implode(', ', array_filter($device_attrs['bluetoothMacAddress'])) 
+                            : $device_attrs['bluetoothMacAddress'];
+                    }
+                    if (!empty($device_attrs['ethernetMacAddress'])) {
+                        $device_info['ethernet_mac_address'] = is_array($device_attrs['ethernetMacAddress']) 
+                            ? implode(', ', array_filter($device_attrs['ethernetMacAddress'])) 
+                            : $device_attrs['ethernetMacAddress'];
                     }
                 } else {
                     // HTTP 200 but unexpected JSON structure

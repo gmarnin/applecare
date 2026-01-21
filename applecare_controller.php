@@ -75,7 +75,7 @@ class Applecare_controller extends Module_controller
     {
         $api_url = null;
         $client_assertion = null;
-        $rate_limit = 20; // Default
+        $rate_limit = 40; // Default
         
         // Try machine group key prefix first
         $mg_key = $this->getMachineGroupKey($serial_number);
@@ -135,7 +135,7 @@ class Applecare_controller extends Module_controller
         }
         $default_rate_limit = getenv('APPLECARE_RATE_LIMIT');
         if (!empty($default_rate_limit)) {
-            $rate_limit = (int)$default_rate_limit ?: 20;
+            $rate_limit = (int)$default_rate_limit ?: 40;
         }
         
         // Return null if still not configured
@@ -585,7 +585,7 @@ class Applecare_controller extends Module_controller
         // Get default configuration from environment (for fallback)
         $default_api_base_url = getenv('APPLECARE_API_URL');
         $default_client_assertion = getenv('APPLECARE_CLIENT_ASSERTION');
-        $default_rate_limit = (int)getenv('APPLECARE_RATE_LIMIT') ?: 20;
+        $default_rate_limit = (int)getenv('APPLECARE_RATE_LIMIT') ?: 40;
 
         if (empty($default_client_assertion) && empty($default_api_base_url)) {
             $outputCallback("WARNING: Default APPLECARE_API_URL and APPLECARE_CLIENT_ASSERTION not set.");
@@ -1463,10 +1463,10 @@ class Applecare_controller extends Module_controller
         $data = [
             'api_url_configured' => false,
             'client_assertion_configured' => false,
-            'rate_limit' => 20,
+            'rate_limit' => 40,
             'default_api_url' => getenv('APPLECARE_API_URL') ?: '',
             'default_client_assertion' => getenv('APPLECARE_CLIENT_ASSERTION') ? 'Yes' : 'No',
-            'default_rate_limit' => getenv('APPLECARE_RATE_LIMIT') ?: '20',
+            'default_rate_limit' => getenv('APPLECARE_RATE_LIMIT') ?: '40',
             'max_execution_time' => $max_execution_time,
         ];
         
@@ -1500,12 +1500,12 @@ class Applecare_controller extends Module_controller
         // Get rate limit (check default first, then look for any org-specific)
         $rate_limit = getenv('APPLECARE_RATE_LIMIT');
         if (!empty($rate_limit)) {
-            $data['rate_limit'] = (int)$rate_limit ?: 20;
+            $data['rate_limit'] = (int)$rate_limit ?: 40;
         } else {
             // Check for org-specific rate limits
             foreach ($all_env as $key => $value) {
                 if (is_string($key) && preg_match('/^[A-Z0-9]+_APPLECARE_RATE_LIMIT$/', $key) && !empty($value)) {
-                    $data['rate_limit'] = (int)$value ?: 20;
+                    $data['rate_limit'] = (int)$value ?: 40;
                     break; // Use first found
                 }
             }

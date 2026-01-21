@@ -23,7 +23,7 @@ Add your AxM credentials to the `.env` file. Use [create_client_assertion.sh](ht
 # Apple Business Manager: https://api-business.apple.com/v1/
 APPLECARE_API_URL=https://api-school.apple.com/v1/
 APPLECARE_CLIENT_ASSERTION="Your Assertion String"
-APPLECARE_RATE_LIMIT=20  # Optional, default is 20 calls per minute
+APPLECARE_RATE_LIMIT=40  # Optional, default is 40 calls per minute
 ```
 
 **Multiple Organizations:**

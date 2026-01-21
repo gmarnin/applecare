@@ -61,7 +61,7 @@ echo "================================================\n\n";
 // Check configuration
 $api_base_url = getenv('APPLECARE_API_URL');
 $client_assertion = getenv('APPLECARE_CLIENT_ASSERTION');
-$rate_limit = (int)getenv('APPLECARE_RATE_LIMIT') ?: 20;
+$rate_limit = (int)getenv('APPLECARE_RATE_LIMIT') ?: 40;
 
 if (empty($client_assertion)) {
     die("ERROR: APPLECARE_CLIENT_ASSERTION not set in .env file\n");
@@ -327,9 +327,9 @@ foreach ($devices as $device) {
                     'order_date' => null,
                     'added_to_org_date' => null,
                     'released_from_org_date' => null,
-                    'wifi_mac_address' => $device_attrs['wifiMacAddress'] ?? null,
+                    'wifi_mac_address' => null,
                     'ethernet_mac_address' => null,
-                    'bluetooth_mac_address' => $device_attrs['bluetoothMacAddress'] ?? null,
+                    'bluetooth_mac_address' => null,
                 ];
                 
                 // Handle order date
@@ -347,9 +347,21 @@ foreach ($devices as $device) {
                     $device_info['released_from_org_date'] = date('Y-m-d H:i:s', strtotime($device_attrs['releasedFromOrgDateTime']));
                 }
                 
-                // Handle array fields (ethernetMacAddress)
-                if (!empty($device_attrs['ethernetMacAddress']) && is_array($device_attrs['ethernetMacAddress'])) {
-                    $device_info['ethernet_mac_address'] = implode(', ', array_filter($device_attrs['ethernetMacAddress']));
+                // Handle MAC address array fields (API 1.5+ returns arrays for all MAC addresses)
+                if (!empty($device_attrs['wifiMacAddress'])) {
+                    $device_info['wifi_mac_address'] = is_array($device_attrs['wifiMacAddress']) 
+                        ? implode(', ', array_filter($device_attrs['wifiMacAddress'])) 
+                        : $device_attrs['wifiMacAddress'];
+                }
+                if (!empty($device_attrs['bluetoothMacAddress'])) {
+                    $device_info['bluetooth_mac_address'] = is_array($device_attrs['bluetoothMacAddress']) 
+                        ? implode(', ', array_filter($device_attrs['bluetoothMacAddress'])) 
+                        : $device_attrs['bluetoothMacAddress'];
+                }
+                if (!empty($device_attrs['ethernetMacAddress'])) {
+                    $device_info['ethernet_mac_address'] = is_array($device_attrs['ethernetMacAddress']) 
+                        ? implode(', ', array_filter($device_attrs['ethernetMacAddress'])) 
+                        : $device_attrs['ethernetMacAddress'];
                 }
                 
                 // Note: activation_lock_status and mdm_enrollment_status are not available

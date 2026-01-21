@@ -116,7 +116,8 @@ var format_applecare_coverage_status = function(colNumber, row) {
         status = col.text();
     
     if (!status || status.trim() === '') {
-        col.html('');
+        // Show "Inactive" with grey label for records with no coverage_status
+        col.html('<span class="label label-default">' + i18n.t('applecare.no_coverage') + '</span>');
         return;
     }
     

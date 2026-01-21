@@ -63,6 +63,7 @@
     "expired": "Expired",
     "inactive": "Expired",
     "inactive_tooltip": "Devices with no active AppleCare coverage",
+    "no_coverage": "Inactive",
     "inactive_title": "Devices with Expired AppleCare",
     "inactive_description": "Devices with no active AppleCare coverage (all plans expired or inactive).",
     "sync_now": "Sync Now",
