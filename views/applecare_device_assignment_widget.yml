@@ -6,12 +6,12 @@ i18n_tooltip: "Shows device assignment status from Apple Business Manager. Green
 icon: fa-sitemap
 listing_link: /show/listing/applecare/applecare
 buttons:
-  - label: Assigned
-    class: btn-success
-    search_component: is_primary=1&device_assignment_status=assigned
-  - label: Unassigned
-    class: btn-warning
-    search_component: is_primary=1&device_assignment_status=unassigned
   - label: Released
     class: btn-danger
     search_component: is_primary=1&device_assignment_status=DEVICE_ASSIGNMENT_UNKNOWN
+  - label: Unassigned
+    class: btn-warning
+    search_component: is_primary=1&device_assignment_status=unassigned
+  - label: Assigned
+    class: btn-success
+    search_component: is_primary=1&device_assignment_status=assigned

@@ -6,11 +6,11 @@ i18n_tooltip: "Shows whether AppleCare coverage can be renewed. Blue indicates r
 icon: fa-plus-square
 listing_link: /show/listing/applecare/applecare
 buttons:
-  - label: 1
-    i18n_label: yes
-    class: btn-info
-    search_component: isRenewable=1
   - label: 0
     i18n_label: no
     class: btn-warning
     search_component: isRenewable=0
+  - label: 1
+    i18n_label: yes
+    class: btn-info
+    search_component: isRenewable=1
