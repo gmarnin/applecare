@@ -54,7 +54,8 @@ class Applecare_helper
     /**
      * Get machine group key for a serial number
      * 
-     * Machine group key is stored in munkireportinfo table in the passphrase column
+     * Performs a cross lookup between machine_group and reportdata tables
+     * to determine the client's passphrase (machine group key)
      *
      * @param string $serial_number
      * @return string|null Machine group key or null if not found
@@ -62,11 +63,16 @@ class Applecare_helper
     private function getMachineGroupKey($serial_number)
     {
         try {
-            // Use Munkireportinfo_model (Eloquent) for this query
-            $result = \Munkireportinfo_model::where('serial_number', $serial_number)
-                ->whereNotNull('passphrase')
-                ->where('passphrase', '!=', '')
-                ->value('passphrase');
+            // Cross lookup: join reportdata with machine_group to get the passphrase
+            $result = \Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('reportdata')
+                ->join('machine_group', 'reportdata.machine_group', '=', 'machine_group.groupid')
+                ->where('reportdata.serial_number', $serial_number)
+                ->where('machine_group.property', 'key')
+                ->whereNotNull('machine_group.value')
+                ->where('machine_group.value', '!=', '')
+                ->value('machine_group.value');
             return $result ?: null;
         } catch (\Exception $e) {
             // Silently fail - machine group key is optional

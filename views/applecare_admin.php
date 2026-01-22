@@ -7,8 +7,7 @@
             <p>Run the AppleCare sync script and inspect the output.</p>
             <div class="alert alert-warning">
                 <strong>Warning:</strong> The sync will stop if you close this page.
-                <br><strong>Connection info:</strong> <span id="timeout-info">Loading...</span>
-                If the connection times out, the sync will automatically resume from where it left off. For very long or automated syncs, the CLI script is available: <code>php sync_applecare.php</code>
+                <br><strong>Connection info:</strong> If the connection times out, the sync will automatically resume from where it left off. For very long or automated syncs, the CLI script is available: <code>php sync_applecare.php</code>
                 <div style="padding-top: 4px;"><strong>Devices to process:</strong> <span id="device-count-display">Loading...</span></div>
             </div>
 
@@ -78,7 +77,7 @@
         // Display connection timeout info
         // Note: PHP execution time limit is disabled for sync operations
         // The actual timeout is from web server/proxy/SSE connection limits
-        $('#timeout-info').text('If connection times out, sync will automatically resume.');
+        // (Text is now static in HTML, no need to set via JavaScript)
         
         var statusRows = '<table class="table table-striped"><tbody>';
         

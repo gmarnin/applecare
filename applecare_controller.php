@@ -44,7 +44,8 @@ class Applecare_controller extends Module_controller
     /**
      * Get machine group key for a serial number
      * 
-     * Machine group key is stored in munkireportinfo table in the passphrase column
+     * Performs a cross lookup between machine_group and reportdata tables
+     * to determine the client's passphrase (machine group key)
      *
      * @param string $serial_number
      * @return string|null Machine group key or null if not found
@@ -52,11 +53,16 @@ class Applecare_controller extends Module_controller
     private function getMachineGroupKey($serial_number)
     {
         try {
-            // Use Munkireportinfo_model (Eloquent) for this query
-            $result = Munkireportinfo_model::where('serial_number', $serial_number)
-                ->whereNotNull('passphrase')
-                ->where('passphrase', '!=', '')
-                ->value('passphrase');
+            // Cross lookup: join reportdata with machine_group to get the passphrase
+            $result = Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('reportdata')
+                ->join('machine_group', 'reportdata.machine_group', '=', 'machine_group.groupid')
+                ->where('reportdata.serial_number', $serial_number)
+                ->where('machine_group.property', 'key')
+                ->whereNotNull('machine_group.value')
+                ->where('machine_group.value', '!=', '')
+                ->value('machine_group.value');
             return $result ?: null;
         } catch (\Exception $e) {
             // Silently fail - machine group key is optional
@@ -344,66 +350,68 @@ class Applecare_controller extends Module_controller
     }
 
     /**
-     * Get progress file path for resumable sync
-     */
-    private function getProgressFilePath()
-    {
-        $storage_path = storage_path('/applecare_sync_progress.json');
-        return $storage_path;
-    }
-
-    /**
-     * Load sync progress from file
+     * Load sync progress from cache table
      */
     private function loadProgress()
     {
-        $progress_file = $this->getProgressFilePath();
-        if (file_exists($progress_file)) {
-            $content = file_get_contents($progress_file);
-            $progress = json_decode($content, true);
-            if ($progress && is_array($progress)) {
-                return $progress;
+        try {
+            $cache_value = \munkireport\models\Cache::select('value')
+                ->where('module', 'applecare')
+                ->where('property', 'sync_progress')
+                ->value('value');
+            
+            if ($cache_value) {
+                $progress = json_decode($cache_value, true);
+                if ($progress && is_array($progress)) {
+                    return $progress;
+                }
             }
+        } catch (\Exception $e) {
+            // Silently fail - progress is optional
         }
         return null;
     }
 
     /**
-     * Save sync progress to file
+     * Save sync progress to cache table
      */
     private function saveProgress($devices, $processed, $excludeExisting)
     {
-        $progress_file = $this->getProgressFilePath();
-        
-        // Load existing progress to preserve started_at timestamp
-        $existing = $this->loadProgress();
-        $started_at = $existing && isset($existing['started_at']) ? $existing['started_at'] : time();
-        
-        $progress = [
-            'devices' => $devices,
-            'processed' => $processed,
-            'exclude_existing' => $excludeExisting,
-            'last_updated' => time(),
-            'started_at' => $started_at
-        ];
-        
-        // Ensure storage directory exists
-        $dir = dirname($progress_file);
-        if (!is_dir($dir)) {
-            @mkdir($dir, 0755, true);
+        try {
+            // Load existing progress to preserve started_at timestamp
+            $existing = $this->loadProgress();
+            $started_at = $existing && isset($existing['started_at']) ? $existing['started_at'] : time();
+            
+            $progress = [
+                'devices' => $devices,
+                'processed' => $processed,
+                'exclude_existing' => $excludeExisting,
+                'last_updated' => time(),
+                'started_at' => $started_at
+            ];
+            
+            // Store in cache table instead of file system
+            \munkireport\models\Cache::updateOrCreate(
+                ['module' => 'applecare', 'property' => 'sync_progress'],
+                ['value' => json_encode($progress, JSON_PRETTY_PRINT), 'timestamp' => time()]
+            );
+        } catch (\Exception $e) {
+            // Silently fail - progress saving is optional
+            error_log('AppleCare: Failed to save progress to cache: ' . $e->getMessage());
         }
-        
-        file_put_contents($progress_file, json_encode($progress, JSON_PRETTY_PRINT));
     }
 
     /**
-     * Clear sync progress file
+     * Clear sync progress from cache table
      */
     private function clearProgress()
     {
-        $progress_file = $this->getProgressFilePath();
-        if (file_exists($progress_file)) {
-            @unlink($progress_file);
+        try {
+            \munkireport\models\Cache::where('module', 'applecare')
+                ->where('property', 'sync_progress')
+                ->delete();
+        } catch (\Exception $e) {
+            // Silently fail - progress clearing is optional
         }
     }
 
@@ -1293,27 +1301,15 @@ class Applecare_controller extends Module_controller
             try {
                 // Get distinct purchase_source_id values and translate them to names
                 // Count distinct devices per reseller (one device counted once even if it has multiple coverage records)
-                $filter = get_machine_group_filter('WHERE', 'reportdata');
-                
-                // Build WHERE clause - use AND if filter already has WHERE, otherwise use WHERE
-                $where_clause = '';
-                if (!empty($filter)) {
-                    $where_clause = $filter . ' AND applecare.purchase_source_id IS NOT NULL';
-                } else {
-                    $where_clause = 'WHERE applecare.purchase_source_id IS NOT NULL';
-                }
-                
-                // Get one purchase_source_id per device, then count devices per reseller
-                $sql = "SELECT 
-                            MAX(applecare.purchase_source_id) AS purchase_source_id
-                        FROM applecare
-                        LEFT JOIN reportdata ON applecare.serial_number = reportdata.serial_number
-                        " . $where_clause . "
-                        GROUP BY applecare.serial_number";
+                // Use Eloquent with selectRaw for MAX aggregation
+                $results = Applecare_model::selectRaw('MAX(applecare.purchase_source_id) AS purchase_source_id')
+                    ->whereNotNull('applecare.purchase_source_id')
+                    ->filter()
+                    ->groupBy('applecare.serial_number')
+                    ->get();
 
                 // Aggregate by purchase_source_id
                 $temp_results = [];
-                $results = Applecare_model::getConnectionResolver()->connection()->select($sql);
                 foreach ($results as $obj) {
                     if (!empty($obj->purchase_source_id)) {
                         $resellerId = $obj->purchase_source_id;
@@ -1359,13 +1355,12 @@ class Applecare_controller extends Module_controller
 
         // Handle device_assignment_status specially - need to check released_from_org_date too
         if ($column === 'device_assignment_status') {
-            $filter = get_machine_group_filter('WHERE', 'reportdata');
-            
             // Get one value per device (using MAX to handle cases where device has multiple records)
             // Then count devices by their device_assignment_status
             // This ensures we count each device only once, even if it has multiple coverage records
             // If device_assignment_status is NULL or 'DEVICE_ASSIGNMENT_UNKNOWN' and released_from_org_date is set, infer 'RELEASED'
-            $sql = "SELECT 
+            // Use Eloquent with selectRaw for CASE statement and aggregation
+            $results = Applecare_model::selectRaw("
                         CASE 
                             WHEN MAX(applecare.released_from_org_date) IS NOT NULL 
                                  AND (MAX(applecare.device_assignment_status) IS NULL 
@@ -1376,14 +1371,14 @@ class Applecare_controller extends Module_controller
                             ELSE 'UNKNOWN'
                         END AS status,
                         COUNT(DISTINCT applecare.serial_number) AS count
-                    FROM applecare
-                    LEFT JOIN reportdata ON applecare.serial_number = reportdata.serial_number
-                    " . $filter . "
-                    GROUP BY applecare.serial_number";
+                    ")
+                    ->filter()
+                    ->groupBy('applecare.serial_number')
+                    ->get();
 
             // Now aggregate by status
             $temp_results = [];
-            foreach (Applecare_model::getConnectionResolver()->connection()->select($sql) as $obj) {
+            foreach ($results as $obj) {
                 $status = strtoupper($obj->status);
                 if (!isset($temp_results[$status])) {
                     $temp_results[$status] = 0;
@@ -1421,36 +1416,39 @@ class Applecare_controller extends Module_controller
         // Handle enrolled_in_dep from mdm_status table
         if ($column === 'enrolled_in_dep') {
             try {
-                $filter = get_machine_group_filter('WHERE', 'reportdata');
-                
-                // Build WHERE clause - use AND if filter already has WHERE, otherwise use WHERE
-                $where_clause = '';
-                if (!empty($filter)) {
-                    $where_clause = $filter . ' AND mdm_status.enrolled_in_dep IS NOT NULL';
-                } else {
-                    $where_clause = 'WHERE mdm_status.enrolled_in_dep IS NOT NULL';
-                }
-                
                 // Count distinct devices by enrolled_in_dep status
                 // Join with applecare to respect machine group filter and only show devices with AppleCare data
-                $sql = "SELECT 
-                            mdm_status.enrolled_in_dep AS label,
-                            COUNT(DISTINCT mdm_status.serial_number) AS count
-                        FROM mdm_status
-                        LEFT JOIN reportdata ON mdm_status.serial_number = reportdata.serial_number
-                        LEFT JOIN applecare ON mdm_status.serial_number = applecare.serial_number
-                        " . $where_clause . "
-                        AND applecare.device_assignment_status IS NOT NULL
-                        GROUP BY mdm_status.enrolled_in_dep
-                        ORDER BY count DESC";
-
-                $results = [];
-                foreach (Applecare_model::getConnectionResolver()->connection()->select($sql) as $obj) {
-                    $results[] = [
-                        'label' => (string)$obj->label,
-                        'count' => (int)$obj->count
-                    ];
+                // Use Eloquent query builder starting from mdm_status table
+                $query = Applecare_model::getConnectionResolver()
+                    ->connection()
+                    ->table('mdm_status')
+                    ->select('mdm_status.enrolled_in_dep AS label')
+                    ->selectRaw('COUNT(DISTINCT mdm_status.serial_number) AS count')
+                    ->leftJoin('reportdata', 'mdm_status.serial_number', '=', 'reportdata.serial_number')
+                    ->leftJoin('applecare', 'mdm_status.serial_number', '=', 'applecare.serial_number')
+                    ->whereNotNull('mdm_status.enrolled_in_dep')
+                    ->whereNotNull('applecare.device_assignment_status');
+                
+                // Apply machine group filter
+                $filter = get_machine_group_filter();
+                if (!empty($filter)) {
+                    // Extract the WHERE clause content (remove leading WHERE/AND)
+                    $filter_condition = preg_replace('/^\s*(WHERE|AND)\s+/i', '', $filter);
+                    if (!empty($filter_condition)) {
+                        $query->whereRaw($filter_condition);
+                    }
                 }
+                
+                $results = $query->groupBy('mdm_status.enrolled_in_dep')
+                    ->orderBy('count', 'desc')
+                    ->get()
+                    ->map(function($item) {
+                        return [
+                            'label' => (string)$item->label,
+                            'count' => (int)$item->count
+                        ];
+                    })
+                    ->toArray();
                 
                 jsonView($results);
                 return;
@@ -1870,30 +1868,26 @@ class Applecare_controller extends Module_controller
         }
 
         try {
-            // Use raw SQL query matching mdm_status pattern
-            // Join with reportdata and use get_machine_group_filter() for proper filtering
+            // Use Eloquent query builder with filter() for machine group filtering
             // Only count devices with primary plans (is_primary = 1)
-            $filter = get_machine_group_filter('WHERE', 'reportdata');
-            
-            $sql = "SELECT 
-                        COUNT(DISTINCT applecare.serial_number) AS count, 
-                        applecare.{$column} AS label
-                    FROM applecare
-                    LEFT JOIN reportdata ON applecare.serial_number = reportdata.serial_number
-                    {$filter}
-                    AND applecare.is_primary = 1
-                    AND applecare.{$column} <> '' 
-                    AND applecare.{$column} IS NOT NULL 
-                    GROUP BY applecare.{$column}
-                    ORDER BY count DESC";
-
-            $results = [];
-            foreach (Applecare_model::getConnectionResolver()->connection()->select($sql) as $obj) {
-                $results[] = [
-                    'label' => (string)$obj->label,
-                    'count' => (int)$obj->count
-                ];
-            }
+            // Use COUNT(DISTINCT) because a device can have multiple coverage records
+            // Column is whitelisted and sanitized above, safe to use in selectRaw
+            $results = Applecare_model::selectRaw('applecare.' . $column . ' AS label')
+                ->selectRaw('COUNT(DISTINCT applecare.serial_number) AS count')
+                ->where('applecare.is_primary', 1)
+                ->whereNotNull('applecare.' . $column)
+                ->where('applecare.' . $column, '!=', '')
+                ->filter()
+                ->groupBy('applecare.' . $column)
+                ->orderBy('count', 'desc')
+                ->get()
+                ->map(function($item) {
+                    return [
+                        'label' => (string)$item->label,
+                        'count' => (int)$item->count
+                    ];
+                })
+                ->toArray();
             
             jsonView($results);
         } catch (\Exception $e) {
