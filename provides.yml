@@ -27,6 +27,8 @@ widgets:
         view: applecare_reseller_widget
     applecare_enrolled_in_dep:
         view: applecare_enrolled_in_dep_widget
+    mdm_server:
+        view: applecare_mdm_server_widget
     applecare_total:
         view: applecare_total_detail_widget
 detail_widgets:

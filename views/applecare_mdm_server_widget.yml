@@ -1,0 +1,10 @@
+type: scrollbox
+widget_id: applecare-mdm-server-widget
+api_url: /module/applecare/get_scroll_widget/mdm_server
+i18n_title: applecare.widget.mdm_server_title
+i18n_tooltip: applecare.widget.mdm_server_tooltip
+icon: fa-server
+listing_link: /show/listing/applecare/applecare
+search_key: label
+i18n_empty_result: no_data
+badge: count

@@ -1,7 +1,6 @@
 <?php 
 
 use Symfony\Component\Yaml\Yaml;
-use Illuminate\Database\Capsule\Manager as Capsule;
 
 /**
  * applecare class
@@ -19,6 +18,9 @@ class Applecare_controller extends Module_controller
     
     /**
      * Get Munki ClientID for a serial number
+     * 
+     * Uses Eloquent's connection to query munkiinfo table
+     * (munkiinfo_model uses legacy Model class, not Eloquent)
      *
      * @param string $serial_number
      * @return string|null ClientID or null if not found
@@ -26,7 +28,9 @@ class Applecare_controller extends Module_controller
     private function getClientId($serial_number)
     {
         try {
-            $result = Capsule::table('munkiinfo')
+            $result = Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('munkiinfo')
                 ->where('serial_number', $serial_number)
                 ->where('munkiinfo_key', 'ClientIdentifier')
                 ->value('munkiinfo_value');
@@ -40,7 +44,8 @@ class Applecare_controller extends Module_controller
     /**
      * Get machine group key for a serial number
      * 
-     * Machine group key is stored in munkireportinfo table in the passphrase column
+     * Performs a cross lookup between machine_group and reportdata tables
+     * to determine the client's passphrase (machine group key)
      *
      * @param string $serial_number
      * @return string|null Machine group key or null if not found
@@ -48,11 +53,16 @@ class Applecare_controller extends Module_controller
     private function getMachineGroupKey($serial_number)
     {
         try {
-            $result = Capsule::table('munkireportinfo')
-                ->where('serial_number', $serial_number)
-                ->whereNotNull('passphrase')
-                ->where('passphrase', '!=', '')
-                ->value('passphrase');
+            // Cross lookup: join reportdata with machine_group to get the passphrase
+            $result = Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('reportdata')
+                ->join('machine_group', 'reportdata.machine_group', '=', 'machine_group.groupid')
+                ->where('reportdata.serial_number', $serial_number)
+                ->where('machine_group.property', 'key')
+                ->whereNotNull('machine_group.value')
+                ->where('machine_group.value', '!=', '')
+                ->value('machine_group.value');
             return $result ?: null;
         } catch (\Exception $e) {
             // Silently fail - machine group key is optional
@@ -340,6 +350,286 @@ class Applecare_controller extends Module_controller
     }
 
     /**
+     * Load sync progress from cache table
+     */
+    private function loadProgress()
+    {
+        $max_retries = 3;
+        for ($retry = 0; $retry < $max_retries; $retry++) {
+            try {
+                $cache_value = \munkireport\models\Cache::select('value')
+                    ->where('module', 'applecare')
+                    ->where('property', 'sync_progress')
+                    ->value('value');
+                
+                if ($cache_value) {
+                    $progress = json_decode($cache_value, true);
+                    if ($progress && is_array($progress)) {
+                        return $progress;
+                    }
+                }
+                return null;
+            } catch (\Exception $e) {
+                $error_message = $e->getMessage();
+                // Check if it's a connection error
+                if (strpos($error_message, 'server has gone away') !== false || 
+                    strpos($error_message, 'Lost connection') !== false ||
+                    strpos($error_message, '2006') !== false) {
+                    if ($retry < $max_retries - 1) {
+                        // Force reconnect before retry
+                        $this->reconnectDatabase();
+                        usleep(500000); // 0.5 seconds
+                        continue;
+                    }
+                }
+                // Silently fail - progress is optional
+                error_log('AppleCare: Failed to load progress from cache (attempt ' . ($retry + 1) . '): ' . $e->getMessage());
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Reconnect database connection
+     */
+    private function reconnectDatabase()
+    {
+        try {
+            // Get the Eloquent connection and force reconnect
+            /** @var \Illuminate\Database\Connection $connection */
+            $connection = Applecare_model::getConnectionResolver()->connection();
+            $connection->reconnect();
+        } catch (\Exception $e) {
+            // Log but don't throw - let retry logic handle it
+            error_log("AppleCare: Database reconnect attempt: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Save sync progress to cache table
+     */
+    private function saveProgress($devices, $processed, $excludeExisting)
+    {
+        $max_retries = 3;
+        for ($retry = 0; $retry < $max_retries; $retry++) {
+            try {
+                // Load existing progress to preserve started_at timestamp
+                $existing = $this->loadProgress();
+                $started_at = $existing && isset($existing['started_at']) ? $existing['started_at'] : time();
+                
+                $progress = [
+                    'devices' => $devices,
+                    'processed' => $processed,
+                    'exclude_existing' => $excludeExisting,
+                    'last_updated' => time(),
+                    'started_at' => $started_at
+                ];
+                
+                // Store in cache table instead of file system
+                \munkireport\models\Cache::updateOrCreate(
+                    ['module' => 'applecare', 'property' => 'sync_progress'],
+                    ['value' => json_encode($progress, JSON_PRETTY_PRINT), 'timestamp' => time()]
+                );
+                return; // Success
+            } catch (\Exception $e) {
+                $error_message = $e->getMessage();
+                // Check if it's a connection error
+                if (strpos($error_message, 'server has gone away') !== false || 
+                    strpos($error_message, 'Lost connection') !== false ||
+                    strpos($error_message, '2006') !== false) {
+                    if ($retry < $max_retries - 1) {
+                        // Force reconnect before retry
+                        $this->reconnectDatabase();
+                        usleep(500000); // 0.5 seconds
+                        continue;
+                    }
+                }
+                // Log error but don't throw - progress saving is optional
+                error_log('AppleCare: Failed to save progress to cache (attempt ' . ($retry + 1) . '): ' . $e->getMessage());
+                return; // Give up after retries
+            }
+        }
+    }
+
+    /**
+     * Clear sync progress from cache table
+     */
+    private function clearProgress()
+    {
+        $max_retries = 3;
+        for ($retry = 0; $retry < $max_retries; $retry++) {
+            try {
+                \munkireport\models\Cache::where('module', 'applecare')
+                    ->where('property', 'sync_progress')
+                    ->delete();
+                return; // Success
+            } catch (\Exception $e) {
+                $error_message = $e->getMessage();
+                // Check if it's a connection error
+                if (strpos($error_message, 'server has gone away') !== false || 
+                    strpos($error_message, 'Lost connection') !== false ||
+                    strpos($error_message, '2006') !== false) {
+                    if ($retry < $max_retries - 1) {
+                        // Force reconnect before retry
+                        $this->reconnectDatabase();
+                        usleep(500000); // 0.5 seconds
+                        continue;
+                    }
+                }
+                // Silently fail - progress clearing is optional
+                error_log('AppleCare: Failed to clear progress from cache (attempt ' . ($retry + 1) . '): ' . $e->getMessage());
+                return; // Give up after retries
+            }
+        }
+    }
+    
+    /**
+     * Check if stop has been requested
+     */
+    private function isStopRequested()
+    {
+        try {
+            $stop_flag = \munkireport\models\Cache::select('value')
+                ->where('module', 'applecare')
+                ->where('property', 'stop_requested')
+                ->value('value');
+            return $stop_flag === '1';
+        } catch (\Exception $e) {
+            // On error, assume not stopped
+            return false;
+        }
+    }
+    
+    /**
+     * Set stop flag
+     */
+    private function setStopFlag($value = true)
+    {
+        try {
+            \munkireport\models\Cache::updateOrCreate(
+                ['module' => 'applecare', 'property' => 'stop_requested'],
+                ['value' => $value ? '1' : '0', 'timestamp' => time()]
+            );
+        } catch (\Exception $e) {
+            error_log('AppleCare: Failed to set stop flag: ' . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Clear stop flag
+     */
+    private function clearStopFlag()
+    {
+        try {
+            \munkireport\models\Cache::where('module', 'applecare')
+                ->where('property', 'stop_requested')
+                ->delete();
+        } catch (\Exception $e) {
+            // Silently fail
+        }
+    }
+    
+    /**
+     * Stop the running sync (public endpoint for admin panel)
+     * Sets a stop flag that the sync loop will check
+     *
+     * @return void
+     * @author tuxudo
+     **/
+    public function stop_sync()
+    {
+        // Check authorization
+        if (! $this->authorized('global')) {
+            $this->jsonError('Not authorized - admin access required', 403);
+            return;
+        }
+        
+        try {
+            $this->setStopFlag(true);
+            jsonView([
+                'success' => true,
+                'message' => 'Stop signal sent. The sync will stop after processing the current device.'
+            ]);
+        } catch (\Exception $e) {
+            error_log('AppleCare: Failed to stop sync: ' . $e->getMessage());
+            $this->jsonError('Failed to stop sync: ' . $e->getMessage(), 500);
+        }
+    }
+    
+    /**
+     * Get current sync progress (public endpoint for admin panel)
+     * Returns remaining device count if progress exists
+     *
+     * @return void
+     * @author tuxudo
+     **/
+    public function get_progress()
+    {
+        // Check authorization
+        if (! $this->authorized('global')) {
+            $this->jsonError('Not authorized - admin access required', 403);
+            return;
+        }
+        
+        try {
+            $progress = $this->loadProgress();
+            if ($progress && isset($progress['devices']) && isset($progress['processed'])) {
+                $total = count($progress['devices']);
+                $processed = count($progress['processed']);
+                $remaining = $total - $processed;
+                
+                jsonView([
+                    'success' => true,
+                    'has_progress' => true,
+                    'total' => $total,
+                    'processed' => $processed,
+                    'remaining' => $remaining
+                ]);
+            } else {
+                jsonView([
+                    'success' => true,
+                    'has_progress' => false,
+                    'remaining' => 0
+                ]);
+            }
+        } catch (\Exception $e) {
+            error_log('AppleCare: Failed to get progress: ' . $e->getMessage());
+            jsonView([
+                'success' => true,
+                'has_progress' => false,
+                'remaining' => 0
+            ]);
+        }
+    }
+    
+    /**
+     * Reset sync progress (public endpoint for admin panel)
+     * Clears the cached progress so next sync starts from beginning
+     *
+     * @return void
+     * @author tuxudo
+     **/
+    public function reset_progress()
+    {
+        // Check authorization
+        if (! $this->authorized('global')) {
+            $this->jsonError('Not authorized - admin access required', 403);
+            return;
+        }
+        
+        try {
+            $this->clearProgress();
+            jsonView([
+                'success' => true,
+                'message' => 'Sync progress has been reset. The next sync will start from the beginning.'
+            ]);
+        } catch (\Exception $e) {
+            error_log('AppleCare: Failed to reset progress: ' . $e->getMessage());
+            $this->jsonError('Failed to reset progress: ' . $e->getMessage(), 500);
+        }
+    }
+
+    /**
      * Stream sync output in real-time using Server-Sent Events
      * Calls sync logic directly without proc_open
      */
@@ -367,27 +657,72 @@ class Applecare_controller extends Module_controller
         flush();
 
         try {
+            // Clear any existing stop flag when starting a new sync
+            $this->clearStopFlag();
+            
             // Check if we should exclude existing records
             $excludeExisting = isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1';
             
-            // Start keep-alive timer to prevent SSE connection timeout
-            $last_keepalive = time();
+            // Check for existing progress (resume from previous sync)
+            $existingProgress = $this->loadProgress();
+            $resuming = false;
             
-            // Call sync logic directly
-            $this->syncAll(function($message, $isError = false) use (&$last_keepalive) {
+            if ($existingProgress) {
+                // Check if progress is recent (within last 2 hours) and matches current parameters
+                $age = time() - $existingProgress['last_updated'];
+                if ($age < 7200 && $existingProgress['exclude_existing'] == $excludeExisting) {
+                    // Additional safety check: ensure there are devices remaining to process
+                    $processed_count = isset($existingProgress['processed']) ? count($existingProgress['processed']) : 0;
+                    $total_count = isset($existingProgress['devices']) ? count($existingProgress['devices']) : 0;
+                    $remaining = $total_count - $processed_count;
+                    
+                    if ($remaining > 0) {
+                        $resuming = true;
+                        $this->sendEvent('output', "Resuming previous sync (interrupted " . round($age / 60) . " minutes ago, $remaining devices remaining)...");
+                        // Send resume info to frontend for progress bar initialization
+                        $this->sendEvent('resume', [
+                            'total' => $total_count,
+                            'processed' => $processed_count,
+                            'remaining' => $remaining
+                        ]);
+                    } else {
+                        // All devices already processed, clear progress and start fresh
+                        $this->clearProgress();
+                        $this->sendEvent('output', "Previous sync progress shows all devices completed. Starting fresh sync...");
+                    }
+                } else {
+                    // Progress is too old or parameters changed, start fresh
+                    $this->clearProgress();
+                }
+            }
+            
+            // Start keep-alive timer to prevent SSE connection timeout
+            // Use a more frequent interval (20 seconds) to prevent 1-hour server timeouts
+            $last_keepalive = time();
+            $keepalive_interval = 20; // Send keep-alive every 20 seconds (more frequent than 30)
+            
+            // Create a shared reference for keep-alive that can be checked in syncAll
+            $keepalive_ref = &$last_keepalive;
+            
+            // Call sync logic directly with enhanced keep-alive checking and progress tracking
+            $this->syncAll(function($message, $isError = false) use (&$keepalive_ref, $keepalive_interval) {
                 if ($isError) {
                     $this->sendEvent('error', $message);
                 } else {
                     $this->sendEvent('output', $message);
                 }
                 
-                // Send keep-alive comment every 30 seconds to prevent SSE timeout
+                // Send keep-alive comment every 20 seconds to prevent SSE timeout
+                // This is critical to prevent 1-hour server/proxy timeouts
                 $now = time();
-                if ($now - $last_keepalive >= 30) {
+                if ($now - $keepalive_ref >= $keepalive_interval) {
                     $this->sendEvent('comment', 'keep-alive');
-                    $last_keepalive = $now;
+                    $keepalive_ref = $now;
                 }
-            }, $excludeExisting);
+            }, $excludeExisting, $keepalive_ref, $keepalive_interval, $existingProgress);
+
+            // Clear progress on successful completion
+            $this->clearProgress();
 
             // Send completion event
             $this->sendEvent('complete', [
@@ -395,6 +730,7 @@ class Applecare_controller extends Module_controller
                 'success' => true
             ]);
         } catch (\Exception $e) {
+            // Don't clear progress on error - allow manual resume
             $this->sendEvent('error', 'Sync failed: ' . $e->getMessage());
             $this->sendEvent('complete', [
                 'exit_code' => 1,
@@ -513,9 +849,13 @@ class Applecare_controller extends Module_controller
      * Sync all devices - can be called from web or CLI
      * 
      * @param callable $outputCallback Function to call for output (message, isError)
+     * @param bool $excludeExisting Whether to exclude devices with existing records
+     * @param int|null $keepalive_ref Reference to last keep-alive time (for SSE streaming)
+     * @param int $keepalive_interval Keep-alive interval in seconds (for SSE streaming)
+     * @param array|null $existingProgress Existing progress data to resume from
      * @return void
      */
-    private function syncAll($outputCallback = null, $excludeExisting = false)
+    private function syncAll($outputCallback = null, $excludeExisting = false, &$keepalive_ref = null, $keepalive_interval = 20, $existingProgress = null)
     {
         // Create helper instance once for reuse
         require_once __DIR__ . '/lib/applecare_helper.php';
@@ -538,9 +878,41 @@ class Applecare_controller extends Module_controller
             };
         }
         
+        // Helper function for interruptible sleep that sends keep-alives during long waits
+        // This prevents 1-hour server timeouts by ensuring connection stays alive
+        $interruptibleSleep = function($seconds) use (&$keepalive_ref, $keepalive_interval, $outputCallback) {
+            if ($keepalive_ref === null) {
+                // Not in streaming mode, use regular sleep
+                sleep($seconds);
+                return;
+            }
+            
+            // Break long sleeps into chunks and send keep-alives
+            $chunk_size = min($keepalive_interval - 2, 15); // Sleep in chunks, leaving 2s buffer for keep-alive
+            $remaining = $seconds;
+            
+            while ($remaining > 0) {
+                $sleep_time = min($remaining, $chunk_size);
+                sleep($sleep_time);
+                $remaining -= $sleep_time;
+                
+                // Send keep-alive if interval has passed
+                $now = time();
+                if ($now - $keepalive_ref >= $keepalive_interval) {
+                    // Send keep-alive via comment (SSE format)
+                    echo ": keep-alive\n\n";
+                    if (ob_get_level()) {
+                        ob_flush();
+                    }
+                    flush();
+                    $keepalive_ref = $now;
+                }
+            }
+        };
+        
         // Wrap output callback to add elapsed time to relevant messages
         $originalCallback = $outputCallback;
-        $outputCallback = function($message, $isError = false) use ($originalCallback, $start_time) {
+        $outputCallback = function($message, $isError = false) use ($originalCallback, $start_time, &$keepalive_ref, $keepalive_interval) {
             // Don't add time prefix to ESTIMATED_TIME control messages
             if (strpos($message, 'ESTIMATED_TIME:') === 0) {
                 $originalCallback($message, $isError);
@@ -575,6 +947,20 @@ class Applecare_controller extends Module_controller
             }
             
             $originalCallback($message, $isError);
+            
+            // Send keep-alive if interval has passed (for SSE streaming)
+            if ($keepalive_ref !== null) {
+                $now = time();
+                if ($now - $keepalive_ref >= $keepalive_interval) {
+                    // Send keep-alive via comment (SSE format)
+                    echo ": keep-alive\n\n";
+                    if (ob_get_level()) {
+                        ob_flush();
+                    }
+                    flush();
+                    $keepalive_ref = $now;
+                }
+            }
         };
 
         $outputCallback("================================================");
@@ -609,7 +995,7 @@ class Applecare_controller extends Module_controller
                 try {
                     $default_access_token = $this->generateAccessToken($default_client_assertion, $default_api_base_url, $outputCallback);
                     // Wait 3 seconds after token generation to respect rate limits
-                    sleep(3);
+                    $interruptibleSleep(3);
                     $outputCallback("");
                     break; // Success, exit retry loop
                 } catch (\Exception $e) {
@@ -619,14 +1005,14 @@ class Applecare_controller extends Module_controller
                         $retry_after = (int)$matches[1];
                         if ($retry_count < $max_retries) {
                             $outputCallback("Rate limit hit during token generation. Waiting {$retry_after}s before retry ({$retry_count}/{$max_retries})...");
-                            sleep($retry_after);
+                            $interruptibleSleep($retry_after);
                             continue; // Retry
                         }
                     } elseif (preg_match('/HTTP 429/i', $e->getMessage())) {
                         // HTTP 429 without retry-after header, wait 30 seconds
                         if ($retry_count < $max_retries) {
                             $outputCallback("Rate limit hit during token generation. Waiting 30s before retry ({$retry_count}/{$max_retries})...");
-                            sleep(30);
+                            $interruptibleSleep(30);
                             continue; // Retry
                         }
                     }
@@ -645,54 +1031,100 @@ class Applecare_controller extends Module_controller
             }
         }
 
-        // Get all devices from database (exact copy from firmware/supported_os)
-        $outputCallback("Fetching device list from database...");
+        // Initialize progress tracking
+        $processed_serials = [];
+        $resuming = false;
         
-        try {
-            // Use Eloquent Query Builder for device list
-            $query = Capsule::table('machine')
-                ->leftJoin('reportdata', 'machine.serial_number', '=', 'reportdata.serial_number')
-                ->select('machine.serial_number');
+        // Check if we're resuming from previous sync
+        if ($existingProgress && isset($existingProgress['devices']) && isset($existingProgress['processed'])) {
+            // Validate progress data
+            $devices = $existingProgress['devices'];
+            $processed_serials = $existingProgress['processed'];
             
-            // Apply machine group filter if applicable
-            $filter = get_machine_group_filter();
-            if (!empty($filter)) {
-                // Extract the WHERE clause content (remove leading WHERE/AND)
-                $filter_condition = preg_replace('/^\s*(WHERE|AND)\s+/i', '', $filter);
-                if (!empty($filter_condition)) {
-                    $query->whereRaw($filter_condition);
+            // Safety: Ensure devices and processed are arrays
+            if (!is_array($devices) || !is_array($processed_serials)) {
+                $outputCallback("WARNING: Invalid progress data format. Starting fresh sync...");
+                $this->clearProgress();
+                $existingProgress = null;
+            } else {
+                // Safety: Ensure processed devices are a subset of devices list
+                $invalid_processed = array_diff($processed_serials, $devices);
+                if (!empty($invalid_processed)) {
+                    $outputCallback("WARNING: Progress file contains " . count($invalid_processed) . " invalid device(s). Cleaning up...");
+                    $processed_serials = array_intersect($processed_serials, $devices);
+                }
+                
+                // Safety: Check if all devices are already processed
+                $remaining = count($devices) - count($processed_serials);
+                if ($remaining <= 0) {
+                    $outputCallback("All devices in progress file are already processed. Starting fresh sync...");
+                    $this->clearProgress();
+                    $existingProgress = null;
+                } else {
+                    $resuming = true;
+                    $processed_count = count($processed_serials);
+                    $total_count = count($devices);
+                    $remaining = $total_count - $processed_count;
+                    $outputCallback("Resuming sync: $processed_count devices already processed, $remaining remaining");
+                    // Send resume info for progress tracking
+                    $outputCallback("RESUME_INFO:$total_count:$processed_count:$remaining");
                 }
             }
-
-            // Loop through each serial number for processing
-            $devices = [];
-            foreach ($query->get() as $serialobj) {
-                $devices[] = $serialobj->serial_number;
-            }
-        } catch (\Exception $e) {
-            throw new \Exception('Database query failed: ' . $e->getMessage());
         }
+        
+        if (!$resuming) {
+            // Get all devices from database (exact copy from firmware/supported_os)
+            $outputCallback("Fetching device list from database...");
+            
+            try {
+                // Use Eloquent Query Builder for device list via Machine_model
+                $query = Machine_model::leftJoin('reportdata', 'machine.serial_number', '=', 'reportdata.serial_number')
+                    ->select('machine.serial_number');
+                
+                // Apply machine group filter if applicable
+                $filter = get_machine_group_filter();
+                if (!empty($filter)) {
+                    // Extract the WHERE clause content (remove leading WHERE/AND)
+                    $filter_condition = preg_replace('/^\s*(WHERE|AND)\s+/i', '', $filter);
+                    if (!empty($filter_condition)) {
+                        $query->whereRaw($filter_condition);
+                    }
+                }
 
-        // Filter out devices that already have AppleCare records if requested
-        // This includes devices with coverage data AND devices with only device info (no coverage)
-        if ($excludeExisting) {
-            $existingSerials = Applecare_model::select('serial_number')
-                ->distinct()
-                ->whereIn('serial_number', $devices)
-                ->whereNotNull('serial_number') // Ensure we have a valid serial number
-                ->pluck('serial_number')
-                ->toArray();
-            
-            $devices = array_diff($devices, $existingSerials);
-            $excludedCount = count($existingSerials);
-            
-            if ($excludedCount > 0) {
-                $outputCallback("Excluding $excludedCount device(s) that already have AppleCare records");
+                // Loop through each serial number for processing
+                $devices = [];
+                foreach ($query->get() as $serialobj) {
+                    $devices[] = $serialobj->serial_number;
+                }
+            } catch (\Exception $e) {
+                throw new \Exception('Database query failed: ' . $e->getMessage());
             }
+
+            // Filter out devices that already have AppleCare records if requested
+            // This includes devices with coverage data AND devices with only device info (no coverage)
+            if ($excludeExisting) {
+                $existingSerials = Applecare_model::select('serial_number')
+                    ->distinct()
+                    ->whereIn('serial_number', $devices)
+                    ->whereNotNull('serial_number') // Ensure we have a valid serial number
+                    ->pluck('serial_number')
+                    ->toArray();
+                
+                $devices = array_diff($devices, $existingSerials);
+                $excludedCount = count($existingSerials);
+                
+                if ($excludedCount > 0) {
+                    $outputCallback("Excluding $excludedCount device(s) that already have AppleCare records");
+                }
+            }
+            
+            // Save initial progress
+            $this->saveProgress($devices, $processed_serials, $excludeExisting);
         }
 
         $total_devices = count($devices);
-        $outputCallback("✓ Found $total_devices devices");
+        $remaining_devices = $total_devices - count($processed_serials);
+        $outputCallback("✓ Found $total_devices devices" . ($resuming ? " ($remaining_devices remaining)" : ""));
         $outputCallback("");
 
         if ($total_devices == 0) {
@@ -723,14 +1155,17 @@ class Applecare_controller extends Module_controller
         $outputCallback("Using 80% of rate limit ($effective_rate_limit calls/minute) to allow room for background updates");
         
         // Calculate devices per minute based on rate limit
-        // Each device requires 2 API calls (device info + coverage)
-        $requests_per_device = 2;
+        // Each device requires 3 API calls (device info + MDM server + coverage)
+        $requests_per_device = 3;
         $devices_per_minute = $effective_rate_limit / $requests_per_device;
-        $estimated_minutes = ceil($total_devices / $devices_per_minute);
+        
+        // Calculate estimated time for remaining devices (not total)
+        $remaining_devices = $total_devices - count($processed_serials);
+        $estimated_minutes = ceil($remaining_devices / $devices_per_minute);
         $estimated_seconds = $estimated_minutes * 60;
         
-        // Send initial estimated time to update header
-        $outputCallback("ESTIMATED_TIME:" . $estimated_seconds . ":" . $total_devices);
+        // Send initial estimated time to update header (for remaining devices)
+        $outputCallback("ESTIMATED_TIME:" . $estimated_seconds . ":" . $remaining_devices);
         
         $outputCallback("");
 
@@ -739,14 +1174,48 @@ class Applecare_controller extends Module_controller
         $last_heartbeat = time();
         $current_device_retries = 0;
         $max_device_retries = 3; // Max retries per device for 429 errors
+        
+        // Safety: Track last progress count to detect if we're stuck
+        $last_progress_count = count($processed_serials);
+        $last_progress_time = time();
+        $max_stall_time = 3600; // Abort if no progress for 1 hour
+        
         foreach ($devices as $serial) {
             $device_index++;
+
+            // Check if stop has been requested
+            if ($this->isStopRequested()) {
+                $outputCallback("Stop requested by user. Saving progress and stopping...");
+                $this->saveProgress($devices, $processed_serials, $excludeExisting);
+                $this->clearStopFlag();
+                throw new \Exception("Sync stopped by user. Progress saved. You can resume later.");
+            }
+
+            // Skip already-processed devices (when resuming)
+            if (in_array($serial, $processed_serials)) {
+                continue;
+            }
+            
+            // Safety check: Abort if we've been stuck without making progress for too long
+            $current_progress_count = count($processed_serials);
+            $now = time();
+            if ($current_progress_count > $last_progress_count) {
+                // We made progress, reset the timer
+                $last_progress_count = $current_progress_count;
+                $last_progress_time = $now;
+            } elseif (($now - $last_progress_time) > $max_stall_time) {
+                // No progress for 1 hour - abort to prevent infinite loop
+                throw new \Exception("Sync stalled: No progress made in the last hour. Aborting to prevent infinite loop.");
+            }
 
             // Skip invalid serials
             if (empty($serial) || strlen($serial) < 8) {
                 $skipped++;
+                // Mark as processed even if invalid (to avoid reprocessing)
+                $processed_serials[] = $serial;
+                $this->saveProgress($devices, $processed_serials, $excludeExisting);
                 // Update estimated time remaining based on configured rate limit
-                $remaining_devices = $total_devices - $device_index;
+                $remaining_devices = $total_devices - count($processed_serials);
                 if ($remaining_devices > 0) {
                     $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
                     $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
@@ -760,11 +1229,13 @@ class Applecare_controller extends Module_controller
             // This helps prevent timeouts on servers with max_execution_time limits and SSE connection timeouts
             $now = time();
             if ($now - $last_heartbeat >= 15) {
-                $outputCallback("Heartbeat: Processing device $device_index of $total_devices...");
+                $processed_count = count($processed_serials);
+                $current_position = $processed_count + 1; // Next device to process (1-indexed)
+                $outputCallback("Heartbeat: Processing device $current_position of $total_devices...");
                 $last_heartbeat = $now;
                 
                 // Update estimated time remaining based on configured rate limit
-                $remaining_devices = $total_devices - $device_index;
+                $remaining_devices = $total_devices - $processed_count;
                 $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
                 $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
                 
@@ -796,9 +1267,9 @@ class Applecare_controller extends Module_controller
                 $effective_rate_limit = (int)($base_rate_limit * 0.8);
                 
                 // Check if making this request would exceed the limit
-                // Account for the fact that we'll add 2 requests (device info + coverage)
+                // Account for the fact that we'll add 3 requests (device info + MDM server + coverage)
                 $requests_in_window = count($request_timestamps);
-                $requests_per_device = 2; // Each device sync makes 2 API calls
+                $requests_per_device = 3; // Each device sync makes 3 API calls (device info + MDM server + coverage)
                 $projected_requests = $requests_in_window + $requests_per_device;
                 
                 if ($projected_requests > $effective_rate_limit) {
@@ -808,7 +1279,7 @@ class Applecare_controller extends Module_controller
                     
                     if ($time_until_oldest_expires > 0) {
                         $outputCallback("Rate limit reached ({$requests_in_window}/{$effective_rate_limit}, would be {$projected_requests} with this device). Waiting {$time_until_oldest_expires}s for oldest request to expire...");
-                        sleep($time_until_oldest_expires);
+                        $interruptibleSleep($time_until_oldest_expires);
                         
                         // Clean up expired timestamps after waiting
                         $now = time();
@@ -847,7 +1318,7 @@ class Applecare_controller extends Module_controller
                         $device_client_assertion = $device_config['client_assertion'];
                         $token_cache[$token_cache_key] = $this->generateAccessToken($device_client_assertion, $device_api_url, function($msg) {});
                         // Wait 3 seconds after token generation to respect rate limits
-                        sleep(3);
+                        $interruptibleSleep(3);
                     }
                     $device_access_token = $token_cache[$token_cache_key];
                     
@@ -860,8 +1331,11 @@ class Applecare_controller extends Module_controller
                     } else {
                         $outputCallback("SKIP (no config found)");
                         $skipped++;
+                        // Mark as processed and save progress
+                        $processed_serials[] = $serial;
+                        $this->saveProgress($devices, $processed_serials, $excludeExisting);
                         // Update estimated time remaining based on configured rate limit
-                        $remaining_devices = $total_devices - $device_index;
+                        $remaining_devices = $total_devices - count($processed_serials);
                         if ($remaining_devices > 0) {
                             $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
                             $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
@@ -876,25 +1350,30 @@ class Applecare_controller extends Module_controller
                 if (isset($result['retry_after']) && $result['retry_after'] > 0) {
                     $current_device_retries++;
                     
-                    if ($current_device_retries <= $max_device_retries) {
-                        $wait_time = $result['retry_after'];
-                        $outputCallback("Rate limit hit (attempt {$current_device_retries}/{$max_device_retries}). Waiting {$wait_time}s before retrying...");
-                        sleep($wait_time);
-                        // Clean up old timestamps after waiting (they're now expired)
-                        $now = time();
-                        $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
-                            return ($now - $timestamp) < $rate_limit_window;
-                        });
-                        // Retry this device
-                        $device_index--; // Decrement to retry same device
-                        continue;
-                    } else {
+                    // Safety: Prevent infinite retry loops
+                    if ($current_device_retries > $max_device_retries) {
                         // Max retries exceeded for this device - skip it
                         $outputCallback("Rate limit hit - max retries ({$max_device_retries}) exceeded. Skipping device.");
                         $skipped++;
+                        // Mark as processed and save progress
+                        $processed_serials[] = $serial;
+                        $this->saveProgress($devices, $processed_serials, $excludeExisting);
                         $current_device_retries = 0; // Reset for next device
                         continue;
                     }
+                    
+                    // Retry with exponential backoff (capped at reasonable limit)
+                    $wait_time = min($result['retry_after'], 300); // Cap at 5 minutes
+                    $outputCallback("Rate limit hit (attempt {$current_device_retries}/{$max_device_retries}). Waiting {$wait_time}s before retrying...");
+                    $interruptibleSleep($wait_time);
+                    // Clean up old timestamps after waiting (they're now expired)
+                    $now = time();
+                    $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
+                        return ($now - $timestamp) < $rate_limit_window;
+                    });
+                    // Retry this device by decrementing index (will be incremented again on next iteration)
+                    $device_index--; // Decrement to retry same device
+                    continue;
                 }
                 
                 // Reset retry counter on successful request (no 429)
@@ -903,13 +1382,13 @@ class Applecare_controller extends Module_controller
                 // Track requests AFTER they're made
                 // Count ALL API calls that were made - they all consume rate limit quota
                 // All devices except "no config found" make API calls:
-                // - Success: 2 requests (device info + coverage)
-                // - 404: 1-2 requests (device lookup fails at 1st or 2nd call)
-                // - Other errors: 2 requests (both calls attempted)
+                // - Success: 3 requests (device info + MDM server + coverage)
+                // - 404: 1 request (device lookup fails at 1st call)
+                // - Other errors: 1-3 requests (depending on where error occurs)
                 // - No config: 0 requests (never calls syncSingleDevice, handled above with continue)
                 if (isset($result['requests']) && $result['requests'] > 0) {
                     // Add timestamp for each request made
-                    // Note: syncSingleDevice typically makes 2 requests (device info + coverage)
+                    // Note: syncSingleDevice typically makes 3 requests (device info + MDM server + coverage)
                     // But 404s on device lookup only make 1 request
                     // We track them with the same timestamp since they happen almost simultaneously
                     $now = time();
@@ -926,16 +1405,20 @@ class Applecare_controller extends Module_controller
                     $skipped++;
                 }
                 
+                // Mark device as processed and save progress (for resumable sync)
+                $processed_serials[] = $serial;
+                $this->saveProgress($devices, $processed_serials, $excludeExisting);
+                
                 // Calculate time taken for this device (API calls + DB save + processing)
                 $device_end_time = microtime(true);
                 $time_took = $device_end_time - $device_start_time;
                 
                 // Don't wait after the last device
-                $remaining_devices = $total_devices - $device_index;
+                $remaining_devices = $total_devices - count($processed_serials);
                 if ($remaining_devices > 0) {
                     // Calculate ideal time per device: 60 seconds / devices_per_minute
                     // devices_per_minute = effective_rate_limit / requests_per_device
-                    // e.g., 16 requests / 2 requests per device = 8 devices per minute
+                    // e.g., 24 requests / 3 requests per device = 8 devices per minute
                     $devices_per_minute = $effective_rate_limit / $requests_per_device;
                     $ideal_time_per_device = $rate_limit_window / $devices_per_minute; // e.g., 60/8 = 7.5 seconds
                     
@@ -950,7 +1433,7 @@ class Applecare_controller extends Module_controller
                 }
                 
                 // Update estimated time remaining based on configured rate limit
-                $remaining_devices = $total_devices - $device_index;
+                $remaining_devices = $total_devices - count($processed_serials);
                 if ($remaining_devices > 0) {
                     $estimated_seconds_remaining = ceil(($remaining_devices / $devices_per_minute) * 60);
                     $outputCallback("ESTIMATED_TIME:" . $estimated_seconds_remaining . ":" . $remaining_devices);
@@ -961,6 +1444,9 @@ class Applecare_controller extends Module_controller
             } catch (\Exception $e) {
                 $outputCallback("ERROR (" . $e->getMessage() . ")", true);
                 $errors++;
+                // Mark as processed even on error (to avoid infinite retry loops) and save progress
+                $processed_serials[] = $serial;
+                $this->saveProgress($devices, $processed_serials, $excludeExisting);
                 // On error, clean up timestamps and let moving window handle rate limiting
                 $now = time();
                 $request_timestamps = array_filter($request_timestamps, function($timestamp) use ($now, $rate_limit_window) {
@@ -1040,27 +1526,24 @@ class Applecare_controller extends Module_controller
             try {
                 // Get distinct purchase_source_id values and translate them to names
                 // Count distinct devices per reseller (one device counted once even if it has multiple coverage records)
-                $filter = get_machine_group_filter('WHERE', 'reportdata');
-                
-                // Build WHERE clause - use AND if filter already has WHERE, otherwise use WHERE
-                $where_clause = '';
-                if (!empty($filter)) {
-                    $where_clause = $filter . ' AND applecare.purchase_source_id IS NOT NULL';
-                } else {
-                    $where_clause = 'WHERE applecare.purchase_source_id IS NOT NULL';
+                // Use Eloquent with selectRaw for MAX aggregation
+                // Add error handling for database connection issues
+                try {
+                    $results = Applecare_model::selectRaw('MAX(applecare.purchase_source_id) AS purchase_source_id')
+                        ->whereNotNull('applecare.purchase_source_id')
+                        ->filter()
+                        ->groupBy('applecare.serial_number')
+                        ->get();
+                } catch (\Exception $e) {
+                    // Log error and return empty array
+                    error_log('AppleCare get_binary_widget error for purchase_source_name (query failed): ' . $e->getMessage());
+                    error_log('AppleCare get_binary_widget error trace: ' . $e->getTraceAsString());
+                    jsonView([]);
+                    return;
                 }
-                
-                // Get one purchase_source_id per device, then count devices per reseller
-                $sql = "SELECT 
-                            MAX(applecare.purchase_source_id) AS purchase_source_id
-                        FROM applecare
-                        LEFT JOIN reportdata ON applecare.serial_number = reportdata.serial_number
-                        " . $where_clause . "
-                        GROUP BY applecare.serial_number";
 
                 // Aggregate by purchase_source_id
                 $temp_results = [];
-                $results = Capsule::select($sql);
                 foreach ($results as $obj) {
                     if (!empty($obj->purchase_source_id)) {
                         $resellerId = $obj->purchase_source_id;
@@ -1106,13 +1589,12 @@ class Applecare_controller extends Module_controller
 
         // Handle device_assignment_status specially - need to check released_from_org_date too
         if ($column === 'device_assignment_status') {
-            $filter = get_machine_group_filter('WHERE', 'reportdata');
-            
             // Get one value per device (using MAX to handle cases where device has multiple records)
             // Then count devices by their device_assignment_status
             // This ensures we count each device only once, even if it has multiple coverage records
             // If device_assignment_status is NULL or 'DEVICE_ASSIGNMENT_UNKNOWN' and released_from_org_date is set, infer 'RELEASED'
-            $sql = "SELECT 
+            // Use Eloquent with selectRaw for CASE statement and aggregation
+            $results = Applecare_model::selectRaw("
                         CASE 
                             WHEN MAX(applecare.released_from_org_date) IS NOT NULL 
                                  AND (MAX(applecare.device_assignment_status) IS NULL 
@@ -1123,14 +1605,14 @@ class Applecare_controller extends Module_controller
                             ELSE 'UNKNOWN'
                         END AS status,
                         COUNT(DISTINCT applecare.serial_number) AS count
-                    FROM applecare
-                    LEFT JOIN reportdata ON applecare.serial_number = reportdata.serial_number
-                    " . $filter . "
-                    GROUP BY applecare.serial_number";
+                    ")
+                    ->filter()
+                    ->groupBy('applecare.serial_number')
+                    ->get();
 
             // Now aggregate by status
             $temp_results = [];
-            foreach (Capsule::select($sql) as $obj) {
+            foreach ($results as $obj) {
                 $status = strtoupper($obj->status);
                 if (!isset($temp_results[$status])) {
                     $temp_results[$status] = 0;
@@ -1168,36 +1650,39 @@ class Applecare_controller extends Module_controller
         // Handle enrolled_in_dep from mdm_status table
         if ($column === 'enrolled_in_dep') {
             try {
-                $filter = get_machine_group_filter('WHERE', 'reportdata');
-                
-                // Build WHERE clause - use AND if filter already has WHERE, otherwise use WHERE
-                $where_clause = '';
-                if (!empty($filter)) {
-                    $where_clause = $filter . ' AND mdm_status.enrolled_in_dep IS NOT NULL';
-                } else {
-                    $where_clause = 'WHERE mdm_status.enrolled_in_dep IS NOT NULL';
-                }
-                
                 // Count distinct devices by enrolled_in_dep status
                 // Join with applecare to respect machine group filter and only show devices with AppleCare data
-                $sql = "SELECT 
-                            mdm_status.enrolled_in_dep AS label,
-                            COUNT(DISTINCT mdm_status.serial_number) AS count
-                        FROM mdm_status
-                        LEFT JOIN reportdata ON mdm_status.serial_number = reportdata.serial_number
-                        LEFT JOIN applecare ON mdm_status.serial_number = applecare.serial_number
-                        " . $where_clause . "
-                        AND applecare.device_assignment_status IS NOT NULL
-                        GROUP BY mdm_status.enrolled_in_dep
-                        ORDER BY count DESC";
-
-                $results = [];
-                foreach (Capsule::select($sql) as $obj) {
-                    $results[] = [
-                        'label' => (string)$obj->label,
-                        'count' => (int)$obj->count
-                    ];
+                // Use Eloquent query builder starting from mdm_status table
+                $query = Applecare_model::getConnectionResolver()
+                    ->connection()
+                    ->table('mdm_status')
+                    ->select('mdm_status.enrolled_in_dep AS label')
+                    ->selectRaw('COUNT(DISTINCT mdm_status.serial_number) AS count')
+                    ->leftJoin('reportdata', 'mdm_status.serial_number', '=', 'reportdata.serial_number')
+                    ->leftJoin('applecare', 'mdm_status.serial_number', '=', 'applecare.serial_number')
+                    ->whereNotNull('mdm_status.enrolled_in_dep')
+                    ->whereNotNull('applecare.device_assignment_status');
+                
+                // Apply machine group filter
+                $filter = get_machine_group_filter();
+                if (!empty($filter)) {
+                    // Extract the WHERE clause content (remove leading WHERE/AND)
+                    $filter_condition = preg_replace('/^\s*(WHERE|AND)\s+/i', '', $filter);
+                    if (!empty($filter_condition)) {
+                        $query->whereRaw($filter_condition);
+                    }
                 }
+                
+                $results = $query->groupBy('mdm_status.enrolled_in_dep')
+                    ->orderBy('count', 'desc')
+                    ->get()
+                    ->map(function($item) {
+                        return [
+                            'label' => (string)$item->label,
+                            'count' => (int)$item->count
+                        ];
+                    })
+                    ->toArray();
                 
                 jsonView($results);
                 return;
@@ -1357,7 +1842,9 @@ class Applecare_controller extends Module_controller
             }
             
             // Get enrolled_in_dep from mdm_status table
-            $enrolled_in_dep = Capsule::table('mdm_status')
+            $enrolled_in_dep = Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('mdm_status')
                 ->where('serial_number', $serial_number)
                 ->value('enrolled_in_dep');
             if ($enrolled_in_dep !== null) {
@@ -1383,8 +1870,7 @@ class Applecare_controller extends Module_controller
             $thirtyDays = date('Y-m-d', strtotime('+30 days'));
             
             // Get all unique serial numbers
-            $serials = Capsule::table('applecare')
-                ->distinct()
+            $serials = Applecare_model::distinct()
                 ->whereNotNull('serial_number')
                 ->pluck('serial_number');
             
@@ -1395,13 +1881,11 @@ class Applecare_controller extends Module_controller
                 }
                 
                 // Reset all plans for this device
-                Capsule::table('applecare')
-                    ->where('serial_number', $serial)
+                Applecare_model::where('serial_number', $serial)
                     ->update(['is_primary' => 0, 'coverage_status' => null]);
                 
                 // Get all plans for this device, sorted by end date desc (latest first)
-                $plans = Capsule::table('applecare')
-                    ->where('serial_number', $serial)
+                $plans = Applecare_model::where('serial_number', $serial)
                     ->orderByRaw("COALESCE(endDateTime, '1970-01-01') DESC")
                     ->get();
                 
@@ -1430,8 +1914,7 @@ class Applecare_controller extends Module_controller
                 }
                 
                 // Update the primary plan
-                Capsule::table('applecare')
-                    ->where('id', $primary->id)
+                Applecare_model::where('id', $primary->id)
                     ->update(['is_primary' => 1, 'coverage_status' => $coverageStatus]);
                 
                 $updated++;
@@ -1553,9 +2036,8 @@ class Applecare_controller extends Module_controller
         $excludeExisting = isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1';
         
         try {
-            // Use Eloquent Query Builder for device list
-            $query = Capsule::table('machine')
-                ->leftJoin('reportdata', 'machine.serial_number', '=', 'reportdata.serial_number')
+            // Use Eloquent Query Builder for device list via Machine_model
+            $query = Machine_model::leftJoin('reportdata', 'machine.serial_number', '=', 'reportdata.serial_number')
                 ->select('machine.serial_number');
             
             // Apply machine group filter if applicable
@@ -1596,6 +2078,56 @@ class Applecare_controller extends Module_controller
                 'count' => 0,
                 'error' => $e->getMessage()
             ]);
+        }
+    }
+
+    /**
+     * Get data for scroll widget
+     *
+     * @param string $column Column name (e.g., 'mdm_server')
+     * @return void
+     * @author tuxudo
+     **/
+    public function get_scroll_widget($column)
+    {
+        // Sanitize input - remove non-column name characters
+        $column = preg_replace("/[^A-Za-z0-9_\-]/", '', $column);
+        
+        // Whitelist allowed columns to prevent column injection
+        $allowed_columns = ['mdm_server'];
+        
+        if (empty($column) || !in_array($column, $allowed_columns)) {
+            jsonView([]);
+            return;
+        }
+
+        try {
+            // Use Eloquent query builder with filter() for machine group filtering
+            // Only count devices with primary plans (is_primary = 1)
+            // Use COUNT(DISTINCT) because a device can have multiple coverage records
+            // Column is whitelisted and sanitized above, safe to use in selectRaw
+            $results = Applecare_model::selectRaw('applecare.' . $column . ' AS label')
+                ->selectRaw('COUNT(DISTINCT applecare.serial_number) AS count')
+                ->where('applecare.is_primary', 1)
+                ->whereNotNull('applecare.' . $column)
+                ->where('applecare.' . $column, '!=', '')
+                ->filter()
+                ->groupBy('applecare.' . $column)
+                ->orderBy('count', 'desc')
+                ->get()
+                ->map(function($item) {
+                    return [
+                        'label' => (string)$item->label,
+                        'count' => (int)$item->count
+                    ];
+                })
+                ->toArray();
+            
+            jsonView($results);
+        } catch (\Exception $e) {
+            error_log("AppleCare: Error in get_scroll_widget for {$column}: " . $e->getMessage());
+            error_log("AppleCare: Error trace: " . $e->getTraceAsString());
+            jsonView([]);
         }
     }
 } 

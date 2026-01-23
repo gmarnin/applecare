@@ -18,6 +18,8 @@ table:
         i18n_header: applecare.column.device_assignment_status
         formatter: format_applecare_device_assignment_status
         filter: device_assignment_status_filter
+    -   column: applecare.mdm_server
+        i18n_header: applecare.column.mdm_server
     -   column: mdm_status.enrolled_in_dep
         i18n_header: applecare.column.enrolled_in_dep
         formatter: format_applecare_enrolled_in_dep
@@ -36,6 +38,7 @@ table:
         formatter: format_applecare_endDateTime
     -   column: applecare.paymentType
         i18n_header: applecare.column.paymentType
+        formatter: format_applecare_paymentType
         filter: paymentType_filter
     -   column: applecare.isRenewable
         i18n_header: applecare.column.isRenewable

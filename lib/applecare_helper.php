@@ -3,7 +3,6 @@
 namespace munkireport\module\applecare;
 
 use Symfony\Component\Yaml\Yaml;
-use Illuminate\Database\Capsule\Manager as Capsule;
 
 class Applecare_helper
 {
@@ -16,8 +15,9 @@ class Applecare_helper
     private function reconnectDatabase()
     {
         try {
-            // Get the Capsule connection and force reconnect
-            $connection = Capsule::connection();
+            // Get the Eloquent connection and force reconnect
+            /** @var \Illuminate\Database\Connection $connection */
+            $connection = \Applecare_model::getConnectionResolver()->connection();
             $connection->reconnect();
         } catch (\Exception $e) {
             // If reconnect fails, log but don't throw - let the retry logic handle it
@@ -27,6 +27,8 @@ class Applecare_helper
 
     /**
      * Get Munki ClientID for a serial number
+     * 
+     * Uses Eloquent's query builder through the connection (munkiinfo uses legacy Model)
      *
      * @param string $serial_number
      * @return string|null ClientID or null if not found
@@ -34,7 +36,11 @@ class Applecare_helper
     private function getClientId($serial_number)
     {
         try {
-            $result = Capsule::table('munkiinfo')
+            // Use Eloquent's connection to query munkiinfo table
+            // (munkiinfo_model uses legacy Model class, not Eloquent)
+            $result = \Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('munkiinfo')
                 ->where('serial_number', $serial_number)
                 ->where('munkiinfo_key', 'ClientIdentifier')
                 ->value('munkiinfo_value');
@@ -48,7 +54,8 @@ class Applecare_helper
     /**
      * Get machine group key for a serial number
      * 
-     * Machine group key is stored in munkireportinfo table in the passphrase column
+     * Performs a cross lookup between machine_group and reportdata tables
+     * to determine the client's passphrase (machine group key)
      *
      * @param string $serial_number
      * @return string|null Machine group key or null if not found
@@ -56,11 +63,16 @@ class Applecare_helper
     private function getMachineGroupKey($serial_number)
     {
         try {
-            $result = Capsule::table('munkireportinfo')
-                ->where('serial_number', $serial_number)
-                ->whereNotNull('passphrase')
-                ->where('passphrase', '!=', '')
-                ->value('passphrase');
+            // Cross lookup: join reportdata with machine_group to get the passphrase
+            $result = \Applecare_model::getConnectionResolver()
+                ->connection()
+                ->table('reportdata')
+                ->join('machine_group', 'reportdata.machine_group', '=', 'machine_group.groupid')
+                ->where('reportdata.serial_number', $serial_number)
+                ->where('machine_group.property', 'key')
+                ->whereNotNull('machine_group.value')
+                ->where('machine_group.value', '!=', '')
+                ->value('machine_group.value');
             return $result ?: null;
         } catch (\Exception $e) {
             // Silently fail - machine group key is optional
@@ -400,6 +412,65 @@ class Applecare_helper
                 
                 if (isset($device_data['data']['attributes'])) {
                     $device_attrs = $device_data['data']['attributes'];
+                    $device_id = $device_data['data']['id'] ?? null;
+                    
+                    // Fetch MDM server information if device ID is available
+                    $mdm_server_name = null;
+                    if ($device_id) {
+                        $mdm_server_url = $api_base_url . "orgDevices/{$device_id}/assignedServer";
+                        $mdm_ch = curl_init($mdm_server_url);
+                        curl_setopt($mdm_ch, CURLOPT_RETURNTRANSFER, true);
+                        curl_setopt($mdm_ch, CURLOPT_HTTPHEADER, [
+                            'Authorization: Bearer ' . $access_token,
+                            'Content-Type: application/json',
+                        ]);
+                        curl_setopt($mdm_ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+                        curl_setopt($mdm_ch, CURLOPT_SSL_VERIFYPEER, true);
+                        curl_setopt($mdm_ch, CURLOPT_TIMEOUT, 30);
+                        curl_setopt($mdm_ch, CURLOPT_CONNECTTIMEOUT, 10);
+                        
+                        $mdm_response = curl_exec($mdm_ch);
+                        $mdm_http_code = curl_getinfo($mdm_ch, CURLINFO_HTTP_CODE);
+                        $mdm_curl_error = curl_error($mdm_ch);
+                        curl_close($mdm_ch);
+                        $requests++;
+                        
+                        // Only process if successful (200) - 404 means no MDM server assigned
+                        if ($mdm_http_code === 200) {
+                            $mdm_data = json_decode($mdm_response, true);
+                            
+                            // Check for JSON decode errors
+                            if (json_last_error() !== JSON_ERROR_NONE) {
+                                error_log("AppleCare: MDM server JSON decode error for {$serial_number}: " . json_last_error_msg() . " - Response: " . substr($mdm_response, 0, 500));
+                            } else {
+                                // The API returns serverName, not name
+                                // Try multiple possible locations for serverName
+                                if (isset($mdm_data['data']['attributes']['serverName'])) {
+                                    $mdm_server_name = $mdm_data['data']['attributes']['serverName'];
+                                } elseif (isset($mdm_data['data']['attributes']['name'])) {
+                                    // Fallback to 'name' if serverName not found
+                                    $mdm_server_name = $mdm_data['data']['attributes']['name'];
+                                } elseif (isset($mdm_data['data']['attributes']['server_name'])) {
+                                    // Fallback to snake_case
+                                    $mdm_server_name = $mdm_data['data']['attributes']['server_name'];
+                                } else {
+                                    // Log for debugging - check what the actual response structure is
+                                    error_log("AppleCare: MDM server response for {$serial_number} - HTTP 200 but serverName not found. Full response: " . substr($mdm_response, 0, 1000));
+                                    error_log("AppleCare: MDM server response structure: " . print_r($mdm_data, true));
+                                }
+                                
+                                // Ensure we preserve the full server name including spaces
+                                if ($mdm_server_name !== null) {
+                                    $mdm_server_name = trim($mdm_server_name); // Only trim whitespace, don't remove spaces
+                                }
+                            }
+                        } elseif ($mdm_http_code === 404) {
+                            // 404 is expected if device has no MDM server assigned - no logging needed
+                        } else {
+                            // Log other errors for debugging
+                            error_log("AppleCare: MDM server lookup failed for {$serial_number} - HTTP {$mdm_http_code}" . ($mdm_curl_error ? " - cURL error: {$mdm_curl_error}" : ""));
+                        }
+                    }
                     
                     // Map available fields from Apple Business Manager API
                     $device_info = [
@@ -411,6 +482,7 @@ class Applecare_helper
                         'color' => $device_attrs['color'] ?? null,
                         'device_capacity' => $device_attrs['deviceCapacity'] ?? null,
                         'device_assignment_status' => $device_attrs['status'] ?? null,
+                        'mdm_server' => $mdm_server_name,
                         'purchase_source_type' => $device_attrs['purchaseSourceType'] ?? null,
                         'purchase_source_id' => $device_attrs['purchaseSourceId'] ?? null,
                         'order_number' => $device_attrs['orderNumber'] ?? null,
@@ -680,6 +752,7 @@ class Applecare_helper
                             'color' => $device_data['color'],
                             'device_capacity' => $device_data['device_capacity'],
                             'device_assignment_status' => $device_data['device_assignment_status'],
+                            'mdm_server' => $device_data['mdm_server'] ?? null,
                             'purchase_source_type' => $device_data['purchase_source_type'],
                             'purchase_source_id' => $device_data['purchase_source_id'],
                             'purchase_source_name' => $device_data['purchase_source_name'] ?? null,

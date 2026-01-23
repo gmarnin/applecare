@@ -2,7 +2,6 @@
 
 use munkireport\processors\Processor;
 use CFPropertyList\CFPropertyList;
-use Illuminate\Database\Capsule\Manager as Capsule;
 
 class Applecare_processor extends Processor
 {
@@ -12,7 +11,9 @@ class Applecare_processor extends Processor
     private function reconnectDatabase()
     {
         try {
-            $connection = Capsule::connection();
+            // Get the Eloquent connection and force reconnect
+            /** @var \Illuminate\Database\Connection $connection */
+            $connection = Applecare_model::getConnectionResolver()->connection();
             $connection->reconnect();
         } catch (\Exception $e) {
             // Log but don't throw - let the retry logic handle it

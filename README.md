@@ -137,39 +137,51 @@ The AppleCare admin page (`Admin` → `Update AppleCare data`) includes:
 
 Based on [AppleCareCoverage.Attributes](https://developer.apple.com/documentation/appleschoolmanagerapi/applecarecoverage/attributes-data.dictionary) and [OrgDevice.Attributes](https://developer.apple.com/documentation/appleschoolmanagerapi/orgdevice/attributes-data.dictionary).
 
-#### AppleCare Coverage Fields
+#### Core Fields
 
-* description - varchar(255) - Description of device coverage.
-* status - varchar(255) - The current status of device coverage. Possible values: 'ACTIVE', 'INACTIVE'
-* startDateTime - DATETIME - Date when coverage period commenced.
-* endDateTime - DATETIME - Date when coverage period ends for the device. This field isn't applicable for AppleCare+ for Business Essentials.
-* contractCancelDateTime - DATETIME - Date when coverage contract was canceled.
-* agreementNumber - varchar(255) - Agreement number associated with device coverage. This field isn't applicable for Limited Warranty and AppleCare+ for Business Essentials.
-* paymentType - varchar(255) - Payment type of device coverage. Possible values: 'ABE_SUBSCRIPTION', 'PAID_UP_FRONT', 'SUBSCRIPTION', 'NONE'
-* isRenewable - Bool - Indicates whether coverage renews after endDateTime for the device. This field isn't applicable for Limited Warranty.
-* isCanceled - Bool - Indicates whether coverage is canceled for the device. This field isn't applicable for Limited Warranty and AppleCare+ for Business Essentials.
-* last_updated - BIGINT - The last time Apple updated this record in Apple Business/School Manager (from API's updatedDateTime).
-* last_fetched - BIGINT - The last time this serial number was checked using the API.
-* sync_in_progress - BOOLEAN - Internal flag to prevent concurrent syncs for the same device.
+* id - VARCHAR(255) - Primary key. **Unique** identifier for each coverage record, provided by the Apple Business/School Manager API (e.g., "H2WH10KXXXXX", "TW1C6LYF46"). Each coverage record from Apple has a unique ID. This is NOT an auto-incrementing integer - it's the coverage ID returned by Apple's API.
+
+* serial_number - VARCHAR(255) - Serial number of the device. Indexed. **NOT unique** - a single device can have multiple coverage records (e.g., Limited Warranty + AppleCare+), each with its own unique `id`.
+* description - VARCHAR(255) - Description of device coverage. Nullable.
+* status - VARCHAR(255) - The current status of device coverage. Possible values: 'ACTIVE', 'INACTIVE'. Nullable, indexed.
+* startDateTime - DATETIME - Date when coverage period commenced. Nullable.
+* endDateTime - DATETIME - Date when coverage period ends for the device. This field isn't applicable for AppleCare+ for Business Essentials. Nullable, indexed.
+* contractCancelDateTime - DATETIME - Date when coverage contract was canceled. Nullable.
+* agreementNumber - VARCHAR(255) - Agreement number associated with device coverage. This field isn't applicable for Limited Warranty and AppleCare+ for Business Essentials. Nullable.
+* paymentType - VARCHAR(255) - Payment type of device coverage. Possible values: 'ABE_SUBSCRIPTION', 'PAID_UP_FRONT', 'SUBSCRIPTION', 'NONE'. Nullable.
+* isRenewable - BOOLEAN - Indicates whether coverage renews after endDateTime for the device. This field isn't applicable for Limited Warranty. Default: false.
+* isCanceled - BOOLEAN - Indicates whether coverage is canceled for the device. This field isn't applicable for Limited Warranty and AppleCare+ for Business Essentials. Default: false.
+* is_primary - BOOLEAN - Flag indicating the primary coverage plan for a device (the plan with the latest end date). Default: 0, indexed.
+* coverage_status - VARCHAR(20) - Calculated coverage status. Possible values: 'active', 'expiring_soon', 'inactive'. Nullable, indexed.
+* last_updated - BIGINT - The last time Apple updated this record in Apple Business/School Manager (from API's updatedDateTime). Nullable.
+* last_fetched - BIGINT - The last time this serial number was checked using the API. Nullable.
+* sync_in_progress - BOOLEAN - Internal flag to prevent concurrent syncs for the same device. Default: 0.
 
 #### Device Information Fields (from Apple Business Manager API)
 
-* model - varchar(255) - Device model name.
-* part_number - varchar(255) - Device part number.
-* product_family - varchar(255) - Product family (e.g., "Mac", "iPad").
-* product_type - varchar(255) - Product type identifier.
-* color - varchar(255) - Device color.
-* device_capacity - varchar(255) - Device storage capacity.
-* device_assignment_status - varchar(255) - Device assignment status (e.g., "ASSIGNED", "UNASSIGNED").
-* purchase_source_type - varchar(255) - Purchase source type (e.g., "RESELLER", "DIRECT").
-* purchase_source_id - varchar(255) - Purchase source identifier (reseller ID).
-* order_number - varchar(255) - Order number.
-* order_date - DATETIME - Order date.
-* added_to_org_date - DATETIME - Date when device was added to organization.
-* released_from_org_date - DATETIME - Date when device was released from organization.
-* wifi_mac_address - varchar(255) - Wi-Fi MAC address.
-* ethernet_mac_address - varchar(255) - Ethernet MAC address(es), comma-separated if multiple.
-* bluetooth_mac_address - varchar(255) - Bluetooth MAC address.
+* model - VARCHAR(255) - Device model name. Nullable.
+* part_number - VARCHAR(255) - Device part number. Nullable.
+* product_family - VARCHAR(255) - Product family (e.g., "Mac", "iPad"). Nullable.
+* product_type - VARCHAR(255) - Product type identifier. Nullable.
+* color - VARCHAR(255) - Device color. Nullable.
+* device_capacity - VARCHAR(255) - Device storage capacity. Nullable.
+* device_assignment_status - VARCHAR(255) - Device assignment status (e.g., "ASSIGNED", "UNASSIGNED"). Nullable, indexed.
+* mdm_server - VARCHAR(255) - MDM server assignment from Apple Business Manager API. Nullable, indexed.
+* purchase_source_type - VARCHAR(255) - Purchase source type (e.g., "RESELLER", "DIRECT"). Nullable, indexed.
+* purchase_source_id - VARCHAR(255) - Purchase source identifier (reseller ID). Nullable.
+* order_number - VARCHAR(255) - Order number. Nullable.
+* order_date - DATETIME - Order date. Nullable.
+* added_to_org_date - DATETIME - Date when device was added to organization. Nullable.
+* released_from_org_date - DATETIME - Date when device was released from organization. Nullable.
+* wifi_mac_address - VARCHAR(255) - Wi-Fi MAC address. Nullable.
+* ethernet_mac_address - VARCHAR(255) - Ethernet MAC address(es), comma-separated if multiple. Nullable.
+* bluetooth_mac_address - VARCHAR(255) - Bluetooth MAC address. Nullable.
+
+#### Indexes
+
+* Primary key: `id`
+* Single column indexes: `serial_number`, `status`, `endDateTime`, `is_primary`, `coverage_status`, `device_assignment_status`, `mdm_server`, `purchase_source_type`
+* Composite indexes: `(serial_number, status)`, `(serial_number, is_primary)`
 
 ### Troubleshooting
 

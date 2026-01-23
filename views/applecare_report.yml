@@ -1,13 +1,14 @@
 row1:
-    applecare_total:
     # applecare_status:
     applecare_device_assignment:
     applecare_enrolled_in_dep:
+    mdm_server:
 row2:
+    applecare_total:
     applecare_isRenewable:
     applecare_isCanceled:
-    applecare_paymentType:
 row3:
+    applecare_paymentType:
     applecare_description:
     applecare_reseller:
 

@@ -86,7 +86,7 @@ $(document).on('appReady', function(){
                     }
                 }
                 // Separate device info fields from AppleCare fields
-                var deviceInfoFields = ['model', 'part_number', 'product_type', 'color', 'device_assignment_status', 'enrolled_in_dep', 'purchase_source_type', 'purchase_source_name', 'purchase_source_id', 'order_number', 'order_date', 'added_to_org_date', 'released_from_org_date', 'wifi_mac_address', 'ethernet_mac_address', 'bluetooth_mac_address'];
+                var deviceInfoFields = ['model', 'part_number', 'product_type', 'color', 'device_assignment_status', 'mdm_server', 'enrolled_in_dep', 'purchase_source_type', 'purchase_source_name', 'purchase_source_id', 'order_number', 'order_date', 'added_to_org_date', 'released_from_org_date', 'wifi_mac_address', 'ethernet_mac_address', 'bluetooth_mac_address'];
                 var applecareFields = ['status', 'description', 'startDateTime', 'endDateTime', 'paymentType', 'isRenewable', 'isCanceled', 'contractCancelDateTime', 'agreementNumber', 'last_updated'];
             
             // Device Information Table
@@ -145,9 +145,15 @@ $(document).on('appReady', function(){
                     }
                     // Format purchase source type
                     else if (key === 'purchase_source_type') {
+                        var sourceTypeDisplay = {
+                            'MANUALLY_ADDED': 'Manually Added',
+                            'RESELLER': 'Reseller',
+                            'DIRECT': 'Direct',
+                            'UNKNOWN': 'Unknown'
+                        };
                         var typeUpper = String(data[key]).toUpperCase();
-                        var typeDisplay = data[key].charAt(0).toUpperCase() + data[key].slice(1).toLowerCase();
-                        td.text(typeDisplay);
+                        var displayValue = sourceTypeDisplay[typeUpper] || data[key].replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+                        td.text(displayValue);
                     }
                     // Format purchase source name with ID in faded brackets
                     else if (key === 'purchase_source_name') {
@@ -190,6 +196,13 @@ $(document).on('appReady', function(){
                         } else {
                             td.text('');
                         }
+                    }
+                    // Format color - convert to title case (e.g., "SPACE BLACK" -> "Space Black")
+                    else if (key === 'color') {
+                        var colorValue = String(data[key]);
+                        // Convert to title case: lowercase first, then capitalize first letter of each word
+                        var titleCase = colorValue.toLowerCase().replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+                        td.text(titleCase);
                     }
                     // Format MDM enrollment status
                     else if (key === 'mdm_enrollment_status') {
@@ -286,6 +299,18 @@ $(document).on('appReady', function(){
                     }
                     else if (key === 'isCanceled') {
                         td.html(formatBoolean(data[key], 'label-danger', 'label-success'));
+                    }
+                    // Format payment type
+                    else if (key === 'paymentType') {
+                        var paymentTypeDisplay = {
+                            'ABE_SUBSCRIPTION': 'ABE Subscription',
+                            'PAID_UP_FRONT': 'Paid Up Front',
+                            'SUBSCRIPTION': 'Subscription',
+                            'NONE': 'None'
+                        };
+                        var paymentUpper = String(data[key]).toUpperCase();
+                        var displayValue = paymentTypeDisplay[paymentUpper] || data[key];
+                        td.text(displayValue);
                     }
                     // Format dates using helper function
                     else if (key === 'startDateTime' || key === 'contractCancelDateTime' || key === 'endDateTime' || key === 'last_updated') {

@@ -26,9 +26,10 @@ class AddIsPrimary extends Migration
     {
         $capsule = new Capsule();
         $capsule::schema()->table('applecare', function (Blueprint $table) {
-            $table->dropIndex(['applecare_is_primary_index']);
-            $table->dropIndex(['applecare_coverage_status_index']);
-            $table->dropIndex(['applecare_serial_number_is_primary_index']);
+            // Drop indexes by column name (Laravel will generate the correct index name)
+            $table->dropIndex(['is_primary']);
+            $table->dropIndex(['coverage_status']);
+            $table->dropIndex(['serial_number', 'is_primary']);
             $table->dropColumn(['is_primary', 'coverage_status']);
         });
     }

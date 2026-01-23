@@ -197,16 +197,59 @@ var is_primary_filter = function(colNumber, d) {
     }
 }
 
+// Payment Type formatter - converts API values to human-readable format
+var format_applecare_paymentType = function(colNumber, row) {
+    var col = $('td:eq('+colNumber+')', row),
+        value = col.text();
+    
+    if (!value || value.trim() === '') {
+        return;
+    }
+    
+    var paymentTypeDisplay = {
+        'ABE_SUBSCRIPTION': 'ABE Subscription',
+        'PAID_UP_FRONT': 'Paid Up Front',
+        'SUBSCRIPTION': 'Subscription',
+        'NONE': 'None'
+    };
+    
+    var displayValue = paymentTypeDisplay[value.toUpperCase()] || value;
+    col.text(displayValue);
+}
+
+// Purchase Source Type formatter - converts API values to human-readable format
+var format_applecare_purchase_source_type = function(colNumber, row) {
+    var col = $('td:eq('+colNumber+')', row),
+        value = col.text();
+    
+    if (!value || value.trim() === '') {
+        return;
+    }
+    
+    var sourceTypeDisplay = {
+        'MANUALLY_ADDED': 'Manually Added',
+        'RESELLER': 'Reseller',
+        'DIRECT': 'Direct',
+        'UNKNOWN': 'Unknown'
+    };
+    
+    var displayValue = sourceTypeDisplay[value.toUpperCase()] || value.replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+    col.text(displayValue);
+}
+
 var paymentType_filter = function(colNumber, d) {
     var paymentTypes = {
         'abe_subscription': 'ABE_SUBSCRIPTION',
+        'abe subscription': 'ABE_SUBSCRIPTION',
         'paid_up_front': 'PAID_UP_FRONT',
+        'paid up front': 'PAID_UP_FRONT',
         'subscription': 'SUBSCRIPTION',
         'none': 'NONE'
     };
     
+    var searchLower = d.search.value.toLowerCase();
     for (var key in paymentTypes) {
-        if (d.search.value.match(new RegExp('^' + key + '$', 'i'))) {
+        if (searchLower === key) {
             d.columns[colNumber].search.value = paymentTypes[key];
             d.search.value = '';
             break;
@@ -436,12 +479,22 @@ function parseApplecareHash() {
     if (hash) {
         // Decode the entire hash first (button widget encodes the whole search_component)
         hash = decodeURIComponent(hash);
-        hash.split('&').forEach(function(param) {
-            var parts = param.split('=');
-            if (parts.length === 2) {
-                applecareHashParams[parts[0]] = decodeURIComponent(parts[1]);
-            }
-        });
+        
+        // Check for @is_primary format (e.g., "Mosyle@is_primary")
+        if (hash.indexOf('@is_primary') !== -1) {
+            var parts = hash.split('@is_primary');
+            var searchValue = parts[0];
+            applecareHashParams.is_primary = '1';
+            applecareHashParams.mdm_server = searchValue;
+        } else {
+            // Standard &key=value format
+            hash.split('&').forEach(function(param) {
+                var parts = param.split('=');
+                if (parts.length === 2) {
+                    applecareHashParams[parts[0]] = decodeURIComponent(parts[1]);
+                }
+            });
+        }
     }
 }
 
@@ -497,21 +550,25 @@ function wrapApplecareFilter() {
             // Re-parse hash in case it changed
             parseApplecareHash();
             
-            // Handle scrollbox widget hash (just a label value, not key=value)
-            // If hash exists but no key=value pairs were parsed, treat hash as search value
-            // Only apply if hash looks like a widget hash (short, no spaces)
+            // Handle scrollbox widget hash formats
+            // Format 1: #value@is_primary (e.g., #Mosyle@is_primary) - already parsed in parseApplecareHash
+            // Format 2: #value (simple value - treat as MDM server search with is_primary=1)
             var hash = window.location.hash.substring(1);
+            var isWidgetHash = false;
             if (hash && Object.keys(applecareHashParams).length === 0) {
                 try {
                     var decodedHash = decodeURIComponent(hash);
-                    // Only apply if it looks like a widget hash (short, no spaces)
-                    // This prevents applying manual search hashes
-                    if (decodedHash.length > 0 && decodedHash.length <= 100 && decodedHash.indexOf(' ') === -1) {
-                        // This is a scrollbox widget hash - decode it and set as search value
-                        // Only set if it's not already set (to allow manual searches)
-                        if (!d.search.value || d.search.value.trim() === '') {
-                            d.search.value = decodedHash;
-                        }
+                    // If parseApplecareHash didn't set params, check if it's a simple value
+                    // Simple values (no =, no &, no @, no spaces, reasonable length) are likely widget clicks
+                    if (decodedHash.length > 0 && decodedHash.length <= 100 && 
+                        decodedHash.indexOf(' ') === -1 && 
+                        decodedHash.indexOf('=') === -1 && 
+                        decodedHash.indexOf('&') === -1 &&
+                        decodedHash.indexOf('@') === -1) {
+                        // This looks like a widget hash - treat as MDM server search with is_primary=1
+                        applecareHashParams.is_primary = '1';
+                        applecareHashParams.mdm_server = decodedHash;
+                        isWidgetHash = true;
                     }
                 } catch(e) {
                     // If decoding fails, ignore it
@@ -597,8 +654,9 @@ function wrapApplecareFilter() {
             } else if (!Array.isArray(d.where)) {
                 d.where = [];
             }
-        
+            
         // Apply is_primary filter using WHERE clause (more reliable than column search)
+        // Filter by primary plans when explicitly requested in hash params
         if (applecareHashParams.is_primary === '1') {
             d.where.push({
                 table: 'applecare',
@@ -686,6 +744,23 @@ function wrapApplecareFilter() {
             });
             d.search.value = '';
         }
+        
+        // Apply mdm_server filter using column search
+        // This can come from hash params (mdm_server=value) or from @is_primary format
+        if (applecareHashParams.mdm_server) {
+            var found = false;
+            $.each(d.columns, function(index, item){
+                if(item.name === 'applecare.mdm_server'){
+                    d.columns[index].search.value = applecareHashParams.mdm_server;
+                    d.columns[index].search.regex = false;
+                    found = true;
+                }
+            });
+            if (found) {
+                // Clear global search when column search is set
+                d.search.value = '';
+            }
+        }
         };
         // Mark as wrapped to prevent multiple wraps
         mr.listingFilter.filter._applecareWrapped = true;
@@ -694,6 +769,7 @@ function wrapApplecareFilter() {
 
 // Try to wrap immediately if mr is available
 wrapApplecareFilter();
+
 
 // Also try to wrap when document is ready (in case mr loads later)
 $(document).ready(function() {

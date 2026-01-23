@@ -3,6 +3,11 @@
 /**
  * AppleCare Sync Command Line Tool
  * 
+ * Uses Eloquent models (Applecare_model, Machine_model) for database operations
+ * following MunkiReport module patterns.
+ */
+
+/**
  * Run this script to sync AppleCare data from Apple School Manager API
  * 
  * Usage:
@@ -47,12 +52,21 @@ if (empty($munkireport_root) || !file_exists($munkireport_root . '/vendor/autolo
 
 echo "MunkiReport root: $munkireport_root\n";
 
-// Bootstrap MunkiReport
-require $munkireport_root . '/vendor/autoload.php';
+// Bootstrap MunkiReport following the pattern from 'please' CLI
+define('APP_ROOT', $munkireport_root . '/');
+define('PUBLIC_ROOT', $munkireport_root . '/public');
 
-// Load environment
-$dotenv = Dotenv\Dotenv::createImmutable($munkireport_root);
-$dotenv->load();
+require_once APP_ROOT . 'app/helpers/env_helper.php';
+require_once APP_ROOT . 'app/helpers/site_helper.php';
+require_once APP_ROOT . 'vendor/autoload.php';
+
+spl_autoload_register('munkireport_autoload');
+
+require_once APP_ROOT . 'app/helpers/config_helper.php';
+initDotEnv();
+initConfig();
+configAppendFile(APP_ROOT . 'app/config/app.php');
+configAppendFile(APP_ROOT . 'app/config/db.php', 'connection');
 
 echo "================================================\n";
 echo "AppleCare Sync Tool\n";
@@ -170,21 +184,12 @@ try {
 
 echo "\n";
 
-// Initialize database connection
+// Initialize database connection using Capsule (following MunkiReport CLI pattern)
 try {
-    $db_config = [
-        'driver' => getenv('CONNECTION_DRIVER') ?: 'sqlite',
-        'database' => getenv('CONNECTION_DATABASE') ?: $munkireport_root . '/app/db/db.sqlite',
-        'host' => getenv('CONNECTION_HOST') ?: 'localhost',
-        'username' => getenv('CONNECTION_USERNAME') ?: '',
-        'password' => getenv('CONNECTION_PASSWORD') ?: '',
-        'charset' => 'utf8',
-        'collation' => 'utf8_unicode_ci',
-        'prefix' => '',
-    ];
-
-    $capsule = new \Illuminate\Database\Capsule\Manager;
-    $capsule->addConnection($db_config);
+    $connection = conf('connection');
+    
+    $capsule = new Capsule();
+    $capsule->addConnection($connection);
     $capsule->setAsGlobal();
     $capsule->bootEloquent();
 
@@ -195,8 +200,7 @@ try {
 
 // Get all devices
 echo "Fetching device list from database...\n";
-$devices = $capsule::table('machine')
-    ->select('serial_number')
+$devices = Machine_model::select('serial_number')
     ->whereNotNull('serial_number')
     ->where('serial_number', '!=', '')
     ->distinct()
@@ -222,9 +226,9 @@ $skipped = 0;
 $request_timestamps = [];
 
 // Calculate devices per minute based on rate limit
-// Each device requires 2 API calls, and we use 80% of limit
+// Each device requires 3 API calls (device info + MDM server + coverage), and we use 80% of limit
 $effective_rate_limit = (int)($rate_limit * 0.8);
-$requests_per_device = 2;
+$requests_per_device = 3;
 $devices_per_minute = $effective_rate_limit / $requests_per_device;
 
 echo "\nStarting sync...\n";
@@ -252,7 +256,7 @@ foreach ($devices as $device) {
     
     // Check if we need to throttle before making requests
     $requests_in_window = count($request_timestamps);
-    $requests_per_device = 2; // Each device makes 2 API calls
+    $requests_per_device = 3; // Each device makes 3 API calls (device info + MDM server + coverage)
     $projected_requests = $requests_in_window + $requests_per_device;
     
     if ($projected_requests > $effective_rate_limit) {
@@ -311,6 +315,41 @@ foreach ($devices as $device) {
             
             if (isset($device_data['data']['attributes'])) {
                 $device_attrs = $device_data['data']['attributes'];
+                $device_id = $device_data['data']['id'] ?? null;
+                
+                // Fetch MDM server information if device ID is available
+                $mdm_server_name = null;
+                if ($device_id) {
+                    $mdm_server_url = $api_base_url . "orgDevices/{$device_id}/assignedServer";
+                    $mdm_ch = curl_init($mdm_server_url);
+                    curl_setopt($mdm_ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($mdm_ch, CURLOPT_HTTPHEADER, [
+                        'Authorization: Bearer ' . $access_token,
+                        'Content-Type: application/json',
+                    ]);
+                    curl_setopt($mdm_ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+                    curl_setopt($mdm_ch, CURLOPT_SSL_VERIFYPEER, true);
+                    curl_setopt($mdm_ch, CURLOPT_TIMEOUT, 30);
+                    curl_setopt($mdm_ch, CURLOPT_CONNECTTIMEOUT, 10);
+                    
+                    $mdm_response = curl_exec($mdm_ch);
+                    $mdm_http_code = curl_getinfo($mdm_ch, CURLINFO_HTTP_CODE);
+                    curl_close($mdm_ch);
+                    
+                    // Track request timestamp for rate limiting
+                    if ($mdm_http_code > 0) {
+                        $request_timestamps[] = time();
+                    }
+                    
+                    // Only process if successful (200) - 404 means no MDM server assigned
+                    if ($mdm_http_code === 200) {
+                        $mdm_data = json_decode($mdm_response, true);
+                        // The API returns serverName, not name
+                        if (isset($mdm_data['data']['attributes']['serverName'])) {
+                            $mdm_server_name = $mdm_data['data']['attributes']['serverName'];
+                        }
+                    }
+                }
                 
                 // Map available fields from Apple Business Manager API
                 $device_info = [
@@ -321,6 +360,7 @@ foreach ($devices as $device) {
                     'color' => $device_attrs['color'] ?? null,
                     'device_capacity' => $device_attrs['deviceCapacity'] ?? null,
                     'device_assignment_status' => $device_attrs['status'] ?? null, // ASSIGNED, UNASSIGNED, etc.
+                    'mdm_server' => $mdm_server_name, // MDM server name from separate endpoint
                     'purchase_source_type' => $device_attrs['purchaseSourceType'] ?? null, // RESELLER, DIRECT, etc.
                     'purchase_source_id' => $device_attrs['purchaseSourceId'] ?? null,
                     'order_number' => $device_attrs['orderNumber'] ?? null,
@@ -508,18 +548,11 @@ foreach ($devices as $device) {
                 'last_fetched' => $fetch_timestamp, // Use the timestamp we set earlier
             ]);
 
-            // Insert or update
-            $existing = $capsule::table('applecare')
-                ->where('id', $coverage['id'])
-                ->first();
-
-            if ($existing) {
-                $capsule::table('applecare')
-                    ->where('id', $coverage['id'])
-                    ->update($coverage_data);
-            } else {
-                $capsule::table('applecare')->insert($coverage_data);
-            }
+            // Insert or update using Eloquent model
+            Applecare_model::updateOrCreate(
+                ['id' => $coverage['id']],
+                $coverage_data
+            );
         }
 
         echo "OK (" . count($data['data']) . " coverage records)\n";
@@ -536,7 +569,7 @@ foreach ($devices as $device) {
     
     // Calculate ideal time per device: 60 seconds / devices_per_minute
     // devices_per_minute = effective_rate_limit / requests_per_device
-    // e.g., 16 requests / 2 requests per device = 8 devices per minute
+    // e.g., 24 requests / 3 requests per device = 8 devices per minute
     $devices_per_minute = $effective_rate_limit / $requests_per_device;
     $ideal_time_per_device = $rate_limit_window / $devices_per_minute; // e.g., 60/8 = 7.5 seconds
     

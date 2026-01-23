@@ -23,6 +23,7 @@ class Applecare_model extends Eloquent
         'color',
         'device_capacity',
         'device_assignment_status',
+        'mdm_server',
         'purchase_source_type',
         'purchase_source_id',
         'order_number',

@@ -18,6 +18,7 @@
         "color": "Color",
         "device_capacity": "Device Capacity",
         "device_assignment_status": "Device Assignment",
+        "mdm_server": "MDM Server",
         "enrolled_in_dep": "Enrolled via DEP/ADE",
         "purchase_source_type": "Purchase Source Type",
         "purchase_source_id": "Purchase Source ID",
@@ -79,6 +80,8 @@
         "agreementNumber_title": "Agreement Number",
         "device_assignment_title": "Device Assignment",
         "reseller_title": "Reseller",
-        "enrolled_in_dep_title": "Enrolled via DEP/ADE"
+        "enrolled_in_dep_title": "Enrolled via DEP/ADE",
+        "mdm_server_title": "MDM Servers",
+        "mdm_server_tooltip": "Shows MDM servers assigned to devices. Each entry displays the server name and count of devices assigned to that server."
     }
 }
