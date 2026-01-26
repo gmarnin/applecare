@@ -86,7 +86,7 @@ $(document).on('appReady', function(){
                     }
                 }
                 // Separate device info fields from AppleCare fields
-                var deviceInfoFields = ['model', 'part_number', 'product_type', 'color', 'device_assignment_status', 'mdm_server', 'enrolled_in_dep', 'purchase_source_type', 'purchase_source_name', 'purchase_source_id', 'order_number', 'order_date', 'added_to_org_date', 'released_from_org_date', 'wifi_mac_address', 'ethernet_mac_address', 'bluetooth_mac_address'];
+                var deviceInfoFields = ['model', 'part_number', 'product_family', 'product_type', 'color', 'device_capacity', 'device_assignment_status', 'mdm_server', 'enrolled_in_dep', 'purchase_source_type', 'purchase_source_name', 'purchase_source_id', 'order_number', 'order_date', 'added_to_org_date', 'released_from_org_date', 'wifi_mac_address', 'ethernet_mac_address', 'bluetooth_mac_address'];
                 var applecareFields = ['status', 'description', 'startDateTime', 'endDateTime', 'paymentType', 'isRenewable', 'isCanceled', 'contractCancelDateTime', 'agreementNumber', 'last_updated'];
             
             // Device Information Table
