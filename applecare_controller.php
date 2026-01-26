@@ -169,11 +169,26 @@ class Applecare_controller extends Module_controller
      */
     private function normalizePath($path)
     {
-        // Replace backslashes with forward slashes (Windows compatibility)
-        $path = str_replace('\\', '/', $path);
-        // Remove double slashes
-        $path = preg_replace('#/+#', '/', $path);
+        // Normalize to OS-appropriate directory separator
+        $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+        // Remove duplicate separators
+        $pattern = DIRECTORY_SEPARATOR === '\\' ? '#\\\\+#' : '#/+#';
+        $path = preg_replace($pattern, DIRECTORY_SEPARATOR, $path);
         return $path;
+    }
+
+    /**
+     * Get the local directory path (supports LOCAL_DIRECTORY_PATH env variable)
+     *
+     * @return string Local directory path
+     */
+    private function getLocalPath()
+    {
+        $local_path = getenv('LOCAL_DIRECTORY_PATH');
+        if ($local_path) {
+            return $this->normalizePath($local_path);
+        }
+        return $this->normalizePath(APP_ROOT . '/local');
     }
 
     /**
@@ -188,7 +203,7 @@ class Applecare_controller extends Module_controller
             return null;
         }
         
-        $config_path = $this->normalizePath(APP_ROOT . '/local/module_configs/applecare_resellers.yml');
+        $config_path = $this->getLocalPath() . DIRECTORY_SEPARATOR . 'module_configs' . DIRECTORY_SEPARATOR . 'applecare_resellers.yml';
         if (!file_exists($config_path)) {
             error_log('AppleCare: Reseller config file not found at: ' . $config_path);
             return $reseller_id;
@@ -238,7 +253,7 @@ class Applecare_controller extends Module_controller
      **/
     public function get_reseller_config()
     {
-        $config_path = $this->normalizePath(APP_ROOT . '/local/module_configs/applecare_resellers.yml');
+        $config_path = $this->getLocalPath() . DIRECTORY_SEPARATOR . 'module_configs' . DIRECTORY_SEPARATOR . 'applecare_resellers.yml';
         $config = [];
         $error = null;
         
@@ -294,6 +309,16 @@ class Applecare_controller extends Module_controller
         // Check if this is a streaming request (SSE)
         $stream = isset($_GET['stream']) && $_GET['stream'] === '1';
         
+        // Debug path to verify request reaches PHP without SSE
+        if ($stream && isset($_GET['debug']) && $_GET['debug'] === '1') {
+            jsonView([
+                'success' => true,
+                'message' => 'Debug OK: sync endpoint reached without SSE stream.',
+                'timestamp' => time()
+            ]);
+            return;
+        }
+        
         if ($stream) {
             return $this->syncStream();
         }
@@ -347,6 +372,921 @@ class Applecare_controller extends Module_controller
             'stdout' => $stdout,
             'stderr' => $stderr,
         ]);
+    }
+    
+    /**
+     * Stream sync output without query params (IIS-safe route)
+     */
+    public function sync_stream()
+    {
+        return $this->syncStream(false);
+    }
+    
+    /**
+     * Stream sync output excluding existing records (IIS-safe route)
+     */
+    public function sync_stream_exclude()
+    {
+        return $this->syncStream(true);
+    }
+    
+    /**
+     * Debug endpoint to verify sync handler is reachable
+     */
+    public function sync_debug()
+    {
+        jsonView([
+            'success' => true,
+            'message' => 'Debug OK: sync endpoint reached without SSE stream.',
+            'timestamp' => time()
+        ]);
+    }
+    
+    /**
+     * Simple test endpoint for polling sync (no auth for testing)
+     */
+    public function synctest()
+    {
+        jsonView([
+            'success' => true,
+            'message' => 'Sync test endpoint reached',
+            'php_binary' => PHP_BINARY,
+            'temp_dir' => sys_get_temp_dir(),
+            'module_path' => $this->module_path,
+            'timestamp' => time()
+        ]);
+    }
+    
+    /**
+     * Start sync (chunked approach for IIS compatibility)
+     * Initializes sync state - actual processing happens via syncchunk endpoint
+     */
+    public function startsync()
+    {
+        // Check if user is logged in via session (won't redirect)
+        if (empty($_SESSION['user']) && empty($_SESSION['auth'])) {
+            jsonView([
+                'success' => false,
+                'message' => 'Not authorized - please log in',
+                'error' => 'auth_required'
+            ]);
+            return;
+        }
+        
+        // Check if sync is already running
+        $status = $this->getSyncStatus();
+        if ($status && isset($status['running']) && $status['running']) {
+            jsonView([
+                'success' => false,
+                'message' => 'Sync is already running',
+                'running' => true
+            ]);
+            return;
+        }
+        
+        // Clear any previous stop flag
+        $this->clearStopFlag();
+        
+        // Get parameters (check both POST and GET for flexibility)
+        $excludeExisting = (isset($_POST['exclude_existing']) && $_POST['exclude_existing'] === '1') ||
+                           (isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1');
+        
+        // Get device list
+        $output = [];
+        $output[] = "================================================";
+        $output[] = "AppleCare Sync Tool";
+        $output[] = "================================================";
+        $output[] = "";
+        
+        // Check configuration
+        $api_base_url = getenv('APPLECARE_API_URL');
+        $client_assertion = getenv('APPLECARE_CLIENT_ASSERTION');
+        $rate_limit = (int)getenv('APPLECARE_RATE_LIMIT') ?: 40;
+        
+        if (empty($client_assertion) || empty($api_base_url)) {
+            jsonView([
+                'success' => false,
+                'message' => 'APPLECARE_API_URL or APPLECARE_CLIENT_ASSERTION not configured'
+            ]);
+            return;
+        }
+        
+        $output[] = "✓ Configuration OK";
+        $output[] = "✓ API URL: $api_base_url";
+        $output[] = "✓ Rate Limit: $rate_limit calls per minute";
+        
+        // Get all devices
+        $output[] = "";
+        $output[] = "Fetching device list from database...";
+        
+        try {
+            $devices = \Machine_model::select('serial_number')
+                ->whereNotNull('serial_number')
+                ->where('serial_number', '!=', '')
+                ->distinct()
+                ->pluck('serial_number')
+                ->toArray();
+        } catch (\Exception $e) {
+            jsonView([
+                'success' => false,
+                'message' => 'Failed to fetch devices: ' . $e->getMessage()
+            ]);
+            return;
+        }
+        
+        $total_devices = count($devices);
+        
+        // If excluding existing, filter out devices that already have AppleCare records
+        if ($excludeExisting && $total_devices > 0) {
+            $existingSerials = Applecare_model::select('serial_number')
+                ->distinct()
+                ->pluck('serial_number')
+                ->toArray();
+            
+            $devices = array_values(array_diff($devices, $existingSerials));
+            $excludedCount = $total_devices - count($devices);
+            $total_devices = count($devices);
+            
+            $output[] = "✓ Excluding $excludedCount device(s) with existing records";
+        }
+        
+        $output[] = "✓ Found $total_devices devices to process";
+        $output[] = "";
+        
+        if ($total_devices === 0) {
+            jsonView([
+                'success' => true,
+                'message' => 'No devices to sync',
+                'output' => implode("\n", $output),
+                'complete' => true
+            ]);
+            return;
+        }
+        
+        // Generate access token
+        $output[] = "Generating access token...";
+        
+        try {
+            $access_token = $this->generateAccessToken($client_assertion, $api_base_url);
+            $output[] = "✓ Access token generated successfully";
+        } catch (\Exception $e) {
+            jsonView([
+                'success' => false,
+                'message' => 'Failed to generate access token: ' . $e->getMessage(),
+                'output' => implode("\n", $output)
+            ]);
+            return;
+        }
+        
+        $output[] = "";
+        $output[] = "Starting sync...";
+        $output[] = "Rate limit: $rate_limit calls per minute";
+        
+        // Store sync state in cache
+        $syncInfo = [
+            'running' => true,
+            'started_at' => time(),
+            'devices' => $devices,
+            'processed' => [],
+            'current_index' => 0,
+            'total' => $total_devices,
+            'synced' => 0,
+            'skipped' => 0,
+            'errors' => 0,
+            'exclude_existing' => $excludeExisting,
+            'access_token' => $access_token,
+            'api_base_url' => $api_base_url,
+            'rate_limit' => $rate_limit,
+            'output_buffer' => implode("\n", $output) . "\n",
+            'last_request_time' => 0
+        ];
+        
+        try {
+            \munkireport\models\Cache::updateOrCreate(
+                ['module' => 'applecare', 'property' => 'sync_status'],
+                ['value' => json_encode($syncInfo), 'timestamp' => time()]
+            );
+        } catch (\Exception $e) {
+            jsonView([
+                'success' => false,
+                'message' => 'Failed to save sync status: ' . $e->getMessage()
+            ]);
+            return;
+        }
+        
+        jsonView([
+            'success' => true,
+            'message' => 'Sync initialized',
+            'total' => $total_devices,
+            'output' => implode("\n", $output)
+        ]);
+    }
+    
+    /**
+     * Process next chunk of devices (called repeatedly by frontend polling)
+     * Processes 1-3 devices per call to stay within request timeout
+     */
+    public function syncchunk()
+    {
+        // Get current sync status
+        $status = $this->getSyncStatus();
+        
+        if (!$status || !isset($status['running']) || !$status['running']) {
+            jsonView([
+                'success' => true,
+                'running' => false,
+                'complete' => true,
+                'output' => ''
+            ]);
+            return;
+        }
+        
+        // Check for stop request
+        if ($this->isStopRequested()) {
+            $status['running'] = false;
+            $output = "\n\nSync stopped by user.\n";
+            $output .= $this->formatSyncSummary($status);
+            $status['output_buffer'] = ($status['output_buffer'] ?? '') . $output;
+            
+            $this->saveSyncStatus($status);
+            $this->clearStopFlag();
+            
+            jsonView([
+                'success' => true,
+                'running' => false,
+                'complete' => true,
+                'output' => $output,
+                'progress' => [
+                    'total' => $status['total'],
+                    'processed' => $status['current_index'],
+                    'synced' => $status['synced'],
+                    'skipped' => $status['skipped'],
+                    'errors' => $status['errors']
+                ]
+            ]);
+            return;
+        }
+        
+        $output = '';
+        $devices = $status['devices'] ?? [];
+        $current_index = $status['current_index'] ?? 0;
+        $total = $status['total'] ?? count($devices);
+        $access_token = $status['access_token'] ?? '';
+        $api_base_url = $status['api_base_url'] ?? '';
+        $rate_limit = $status['rate_limit'] ?? 40;
+        
+        // Check if we're done
+        if ($current_index >= $total) {
+            $status['running'] = false;
+            $output = $this->formatSyncSummary($status);
+            $status['output_buffer'] = ($status['output_buffer'] ?? '') . $output;
+            
+            $this->saveSyncStatus($status);
+            
+            jsonView([
+                'success' => true,
+                'running' => false,
+                'complete' => true,
+                'output' => $output,
+                'progress' => [
+                    'total' => $total,
+                    'processed' => $current_index,
+                    'synced' => $status['synced'],
+                    'skipped' => $status['skipped'],
+                    'errors' => $status['errors']
+                ]
+            ]);
+            return;
+        }
+        
+        // Rate limiting: ensure minimum time between requests
+        // Each device makes ~3 API calls, so we need to pace accordingly
+        $effective_rate_limit = (int)($rate_limit * 0.8);
+        $requests_per_device = 3;
+        $min_time_per_device = 60 / ($effective_rate_limit / $requests_per_device);
+        
+        $last_request_time = $status['last_request_time'] ?? 0;
+        $time_since_last = time() - $last_request_time;
+        
+        if ($time_since_last < $min_time_per_device && $last_request_time > 0) {
+            // Not enough time has passed, just return current status
+            jsonView([
+                'success' => true,
+                'running' => true,
+                'complete' => false,
+                'output' => '',
+                'waiting' => true,
+                'wait_time' => ceil($min_time_per_device - $time_since_last),
+                'progress' => [
+                    'total' => $total,
+                    'processed' => $current_index,
+                    'synced' => $status['synced'],
+                    'skipped' => $status['skipped'],
+                    'errors' => $status['errors']
+                ]
+            ]);
+            return;
+        }
+        
+        // Process one device
+        $serial = $devices[$current_index];
+        $output .= "Processing $serial... ";
+        
+        try {
+            $result = $this->syncSingleDevice($serial, $access_token, $api_base_url);
+            
+            if ($result['success']) {
+                $output .= "OK (" . $result['records'] . " coverage records)\n";
+                $status['synced']++;
+            } else {
+                $output .= $result['message'] . "\n";
+                if (strpos($result['message'], 'SKIP') !== false) {
+                    $status['skipped']++;
+                } else {
+                    $status['errors']++;
+                }
+            }
+        } catch (\Exception $e) {
+            $output .= "ERROR (" . $e->getMessage() . ")\n";
+            $status['errors']++;
+        }
+        
+        // Update status
+        $status['current_index']++;
+        $status['last_request_time'] = time();
+        $status['output_buffer'] = ($status['output_buffer'] ?? '') . $output;
+        
+        $this->saveSyncStatus($status);
+        
+        jsonView([
+            'success' => true,
+            'running' => true,
+            'complete' => false,
+            'output' => $output,
+            'progress' => [
+                'total' => $total,
+                'processed' => $status['current_index'],
+                'synced' => $status['synced'],
+                'skipped' => $status['skipped'],
+                'errors' => $status['errors']
+            ]
+        ]);
+    }
+    
+    /**
+     * Format sync summary
+     */
+    private function formatSyncSummary($status)
+    {
+        $total = $status['total'] ?? 0;
+        $synced = $status['synced'] ?? 0;
+        $skipped = $status['skipped'] ?? 0;
+        $errors = $status['errors'] ?? 0;
+        $started_at = $status['started_at'] ?? time();
+        
+        $total_time = time() - $started_at;
+        $minutes = floor($total_time / 60);
+        $seconds = $total_time % 60;
+        $time_display = $minutes > 0 ? "{$minutes}m {$seconds}s" : "{$seconds}s";
+        
+        $output = "\n";
+        $output .= "================================================\n";
+        $output .= "Sync Complete\n";
+        $output .= "================================================\n";
+        $output .= "Total devices: $total\n";
+        $output .= "Synced: $synced\n";
+        $output .= "Skipped: $skipped\n";
+        $output .= "Errors: $errors\n";
+        $output .= "Total time: $time_display\n";
+        $output .= "================================================\n";
+        
+        return $output;
+    }
+    
+    /**
+     * Sync a single device and return result
+     */
+    /**
+     * Execute a cURL request with retry logic for chunked encoding errors
+     */
+    private function curlExecWithRetry($ch, $max_retries = 3)
+    {
+        for ($attempt = 1; $attempt <= $max_retries; $attempt++) {
+            $response = curl_exec($ch);
+            $error = curl_error($ch);
+            
+            // If no error or not a chunked encoding error, return
+            if (empty($error) || strpos($error, 'chunk') === false) {
+                return ['response' => $response, 'error' => $error];
+            }
+            
+            // Chunked encoding error - wait briefly and retry
+            if ($attempt < $max_retries) {
+                usleep(500000); // 0.5 second delay
+                curl_reset($ch);
+                // Re-apply options (they're lost after curl_reset)
+                // This is handled by the caller recreating the handle
+            }
+        }
+        
+        return ['response' => $response, 'error' => $error];
+    }
+    
+    private function syncSingleDevice($serial, $access_token, $api_base_url)
+    {
+        // Skip invalid serials
+        if (empty($serial) || strlen($serial) < 8) {
+            return ['success' => false, 'message' => 'SKIP (invalid serial)'];
+        }
+        
+        $ssl_verify = getenv('APPLECARE_SSL_VERIFY');
+        $ssl_verify = ($ssl_verify === 'false' || $ssl_verify === '0' || $ssl_verify === 'no') ? false : true;
+        
+        // Common cURL options for Apple API
+        $curlOptions = function($url) use ($access_token, $ssl_verify) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => [
+                    'Authorization: Bearer ' . $access_token,
+                    'Content-Type: application/json',
+                    'Accept: application/json',
+                ],
+                CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                CURLOPT_SSL_VERIFYPEER => $ssl_verify,
+                CURLOPT_SSL_VERIFYHOST => $ssl_verify ? 2 : 0,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_FRESH_CONNECT => true, // New connection each time
+                CURLOPT_FORBID_REUSE => true,  // Don't reuse connections
+            ]);
+            return $ch;
+        };
+        
+        // First, fetch device information with retry
+        $device_info = [];
+        $device_url = $api_base_url . "orgDevices/{$serial}";
+        
+        $max_retries = 3;
+        $device_response = null;
+        $device_http_code = 0;
+        $device_curl_error = '';
+        
+        for ($retry = 0; $retry < $max_retries; $retry++) {
+            $ch = $curlOptions($device_url);
+            $device_response = curl_exec($ch);
+            $device_http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $device_curl_error = curl_error($ch);
+            curl_close($ch);
+            
+            // If success or not a chunked error, break
+            if (empty($device_curl_error) || strpos($device_curl_error, 'chunk') === false) {
+                break;
+            }
+            
+            // Chunked error - wait and retry
+            if ($retry < $max_retries - 1) {
+                usleep(500000); // 0.5 second
+            }
+        }
+        
+        if ($device_curl_error && strpos($device_curl_error, 'chunk') !== false) {
+            return ['success' => false, 'message' => 'SKIP (chunked encoding error after retries)'];
+        }
+        
+        if ($device_curl_error) {
+            return ['success' => false, 'message' => 'ERROR (curl: ' . $device_curl_error . ')'];
+        }
+        
+        if ($device_http_code === 404) {
+            return ['success' => false, 'message' => 'SKIP (device not found in ABM)'];
+        }
+        
+        if ($device_http_code === 401) {
+            return ['success' => false, 'message' => 'ERROR (token expired)'];
+        }
+        
+        // Extract device info if available
+        $device_attrs = [];
+        $mdm_server_name = null;
+        
+        if ($device_http_code === 200) {
+            $device_data = json_decode($device_response, true);
+            if (isset($device_data['data']['attributes'])) {
+                $device_attrs = $device_data['data']['attributes'];
+                $device_id = $device_data['data']['id'] ?? null;
+                
+                // Fetch MDM server info
+                if ($device_id) {
+                    $mdm_url = $api_base_url . "orgDevices/{$device_id}/assignedServer";
+                    
+                    for ($mdm_retry = 0; $mdm_retry < $max_retries; $mdm_retry++) {
+                        $mdm_ch = $curlOptions($mdm_url);
+                        $mdm_response = curl_exec($mdm_ch);
+                        $mdm_http_code = curl_getinfo($mdm_ch, CURLINFO_HTTP_CODE);
+                        $mdm_error = curl_error($mdm_ch);
+                        curl_close($mdm_ch);
+                        
+                        if (empty($mdm_error) || strpos($mdm_error, 'chunk') === false) {
+                            break;
+                        }
+                        if ($mdm_retry < $max_retries - 1) {
+                            usleep(500000);
+                        }
+                    }
+                    
+                    if ($mdm_http_code === 200 && empty($mdm_error)) {
+                        $mdm_data = json_decode($mdm_response, true);
+                        $mdm_server_name = $mdm_data['data']['attributes']['serverName'] ?? null;
+                    }
+                }
+                
+                // Build device info
+                $device_info = [
+                    'model' => $device_attrs['deviceModel'] ?? null,
+                    'part_number' => $device_attrs['partNumber'] ?? null,
+                    'product_family' => $device_attrs['productFamily'] ?? null,
+                    'product_type' => $device_attrs['productType'] ?? null,
+                    'color' => $device_attrs['color'] ?? null,
+                    'device_capacity' => $device_attrs['deviceCapacity'] ?? null,
+                    'device_assignment_status' => $device_attrs['status'] ?? null,
+                    'mdm_server' => $mdm_server_name,
+                    'purchase_source_type' => $device_attrs['purchaseSourceType'] ?? null,
+                    'purchase_source_id' => $device_attrs['purchaseSourceId'] ?? null,
+                    'order_number' => $device_attrs['orderNumber'] ?? null,
+                    'order_date' => !empty($device_attrs['orderDateTime']) ? date('Y-m-d H:i:s', strtotime($device_attrs['orderDateTime'])) : null,
+                    'added_to_org_date' => !empty($device_attrs['addedToOrgDateTime']) ? date('Y-m-d H:i:s', strtotime($device_attrs['addedToOrgDateTime'])) : null,
+                    'released_from_org_date' => !empty($device_attrs['releasedFromOrgDateTime']) ? date('Y-m-d H:i:s', strtotime($device_attrs['releasedFromOrgDateTime'])) : null,
+                ];
+            }
+        }
+        
+        // Fetch AppleCare coverage with retry
+        $coverage_url = $api_base_url . "orgDevices/{$serial}/appleCareCoverage";
+        
+        $response = null;
+        $http_code = 0;
+        $curl_error = '';
+        
+        for ($cov_retry = 0; $cov_retry < $max_retries; $cov_retry++) {
+            $ch = $curlOptions($coverage_url);
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curl_error = curl_error($ch);
+            curl_close($ch);
+            
+            if (empty($curl_error) || strpos($curl_error, 'chunk') === false) {
+                break;
+            }
+            if ($cov_retry < $max_retries - 1) {
+                usleep(500000);
+            }
+        }
+        
+        if ($curl_error && strpos($curl_error, 'chunk') !== false) {
+            return ['success' => false, 'message' => 'SKIP (chunked encoding error after retries)'];
+        }
+        
+        if ($curl_error) {
+            return ['success' => false, 'message' => 'ERROR (curl: ' . $curl_error . ')'];
+        }
+        
+        if ($http_code === 404) {
+            return ['success' => false, 'message' => 'SKIP (no coverage found)'];
+        }
+        
+        if ($http_code !== 200) {
+            return ['success' => false, 'message' => 'SKIP (HTTP ' . $http_code . ')'];
+        }
+        
+        $data = json_decode($response, true);
+        
+        if (!isset($data['data']) || empty($data['data'])) {
+            return ['success' => false, 'message' => 'SKIP (no coverage data)'];
+        }
+        
+        // Save coverage records
+        $fetch_timestamp = time();
+        $records_saved = 0;
+        
+        foreach ($data['data'] as $coverage) {
+            $attrs = $coverage['attributes'] ?? [];
+            
+            $last_updated = null;
+            if (!empty($attrs['updatedDateTime'])) {
+                $last_updated = strtotime($attrs['updatedDateTime']);
+            }
+            
+            $coverage_data = array_merge($device_info, [
+                'id' => $coverage['id'],
+                'serial_number' => $serial,
+                'description' => $attrs['description'] ?? '',
+                'status' => $attrs['status'] ?? '',
+                'agreementNumber' => $attrs['agreementNumber'] ?? '',
+                'paymentType' => $attrs['paymentType'] ?? '',
+                'isRenewable' => !empty($attrs['isRenewable']) ? 1 : 0,
+                'isCanceled' => !empty($attrs['isCanceled']) ? 1 : 0,
+                'startDateTime' => !empty($attrs['startDateTime']) ? date('Y-m-d', strtotime($attrs['startDateTime'])) : null,
+                'endDateTime' => !empty($attrs['endDateTime']) ? date('Y-m-d', strtotime($attrs['endDateTime'])) : null,
+                'contractCancelDateTime' => !empty($attrs['contractCancelDateTime']) ? date('Y-m-d', strtotime($attrs['contractCancelDateTime'])) : null,
+                'last_updated' => $last_updated,
+                'last_fetched' => $fetch_timestamp,
+            ]);
+            
+            Applecare_model::updateOrCreate(
+                ['id' => $coverage['id']],
+                $coverage_data
+            );
+            
+            $records_saved++;
+        }
+        
+        return ['success' => true, 'records' => $records_saved];
+    }
+    
+    /**
+     * Save sync status to cache
+     */
+    private function saveSyncStatus($status)
+    {
+        try {
+            \munkireport\models\Cache::updateOrCreate(
+                ['module' => 'applecare', 'property' => 'sync_status'],
+                ['value' => json_encode($status), 'timestamp' => time()]
+            );
+        } catch (\Exception $e) {
+            error_log('AppleCare: Failed to save sync status: ' . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Start sync in background (polling-based approach for IIS compatibility)
+     * Spawns CLI script and writes output to a log file
+     */
+    public function start_sync_background()
+    {
+        // Check authorization
+        if (! $this->authorized('global')) {
+            $this->jsonError('Not authorized - admin access required', 403);
+            return;
+        }
+        
+        // Check if sync is already running
+        $status = $this->getSyncStatus();
+        if ($status && $status['running']) {
+            jsonView([
+                'success' => false,
+                'message' => 'Sync is already running',
+                'running' => true
+            ]);
+            return;
+        }
+        
+        // Clear any previous stop flag
+        $this->clearStopFlag();
+        
+        // Get parameters
+        $excludeExisting = isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1';
+        
+        // Set up log file path
+        $logDir = sys_get_temp_dir();
+        $logFile = $logDir . '/applecare_sync_' . time() . '.log';
+        
+        // Get script and MR root paths
+        $scriptPath = realpath($this->module_path . '/sync_applecare.php');
+        if (!$scriptPath || !file_exists($scriptPath)) {
+            $this->jsonError('sync_applecare.php not found', 500);
+            return;
+        }
+        
+        $mrRoot = defined('APP_ROOT') ? APP_ROOT : dirname(dirname(dirname(dirname(__FILE__))));
+        if (!is_dir($mrRoot) || !file_exists($mrRoot . '/vendor/autoload.php')) {
+            $this->jsonError('MunkiReport root not found: ' . $mrRoot, 500);
+            return;
+        }
+        
+        // Build command
+        $phpBin = PHP_BINARY ?: 'php';
+        $cmd = escapeshellcmd($phpBin) . ' ' . escapeshellarg($scriptPath) . ' sync ' . escapeshellarg($mrRoot);
+        if ($excludeExisting) {
+            $cmd .= ' --exclude-existing';
+        }
+        
+        // Redirect output to log file
+        // On Windows, use 'start /B' for background; on Unix use '&'
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            // Windows: use start /B and redirect output
+            $cmd = 'start /B ' . $cmd . ' > ' . escapeshellarg($logFile) . ' 2>&1';
+            pclose(popen($cmd, 'r'));
+        } else {
+            // Unix: use nohup and &
+            $cmd = 'nohup ' . $cmd . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
+            exec($cmd);
+        }
+        
+        // Store sync status in cache
+        $syncInfo = [
+            'running' => true,
+            'started_at' => time(),
+            'log_file' => $logFile,
+            'exclude_existing' => $excludeExisting,
+            'last_read_position' => 0
+        ];
+        
+        \munkireport\models\Cache::updateOrCreate(
+            ['module' => 'applecare', 'property' => 'sync_status'],
+            ['value' => json_encode($syncInfo), 'timestamp' => time()]
+        );
+        
+        jsonView([
+            'success' => true,
+            'message' => 'Sync started in background',
+            'log_file' => basename($logFile)
+        ]);
+    }
+    
+    /**
+     * Get sync output for polling
+     * Returns new lines since last poll
+     */
+    public function get_sync_output()
+    {
+        // Check authorization
+        if (! $this->authorized('global')) {
+            $this->jsonError('Not authorized - admin access required', 403);
+            return;
+        }
+        
+        $status = $this->getSyncStatus();
+        
+        if (!$status || !isset($status['log_file'])) {
+            jsonView([
+                'success' => true,
+                'running' => false,
+                'output' => '',
+                'complete' => true
+            ]);
+            return;
+        }
+        
+        $logFile = $status['log_file'];
+        $lastPosition = $status['last_read_position'] ?? 0;
+        $newOutput = '';
+        $complete = false;
+        $running = true;
+        
+        if (file_exists($logFile)) {
+            $handle = fopen($logFile, 'r');
+            if ($handle) {
+                // Seek to last position
+                fseek($handle, $lastPosition);
+                
+                // Read new content
+                $newOutput = '';
+                while (!feof($handle)) {
+                    $newOutput .= fread($handle, 8192);
+                }
+                
+                // Get new position
+                $newPosition = ftell($handle);
+                fclose($handle);
+                
+                // Update last read position
+                $status['last_read_position'] = $newPosition;
+                
+                // Check if sync is complete (look for completion markers)
+                if (strpos($newOutput, 'Sync Complete') !== false || 
+                    strpos($newOutput, 'Exit code:') !== false) {
+                    $complete = true;
+                    $running = false;
+                    $status['running'] = false;
+                }
+                
+                // Also check if process is still running (file not modified in 30 seconds)
+                $lastModified = filemtime($logFile);
+                if (time() - $lastModified > 30 && $newOutput === '') {
+                    // No new output and file not modified - likely process died
+                    $complete = true;
+                    $running = false;
+                    $status['running'] = false;
+                }
+                
+                // Save updated status
+                \munkireport\models\Cache::updateOrCreate(
+                    ['module' => 'applecare', 'property' => 'sync_status'],
+                    ['value' => json_encode($status), 'timestamp' => time()]
+                );
+            }
+        } else {
+            // Log file doesn't exist yet - sync may still be starting
+            $startedAt = $status['started_at'] ?? 0;
+            if (time() - $startedAt > 10) {
+                // If more than 10 seconds and no log file, something went wrong
+                $complete = true;
+                $running = false;
+                $newOutput = "ERROR: Sync process failed to start. Log file not created.\n";
+            }
+        }
+        
+        // Parse progress from output
+        $progress = $this->parseProgressFromOutput($newOutput);
+        
+        jsonView([
+            'success' => true,
+            'running' => $running,
+            'output' => $newOutput,
+            'complete' => $complete,
+            'progress' => $progress
+        ]);
+    }
+    
+    /**
+     * Parse progress information from sync output
+     */
+    private function parseProgressFromOutput($output)
+    {
+        $progress = [
+            'total' => 0,
+            'processed' => 0,
+            'synced' => 0,
+            'skipped' => 0,
+            'errors' => 0
+        ];
+        
+        // Look for "Found X devices"
+        if (preg_match('/Found\s+(\d+)\s+devices/i', $output, $matches)) {
+            $progress['total'] = (int)$matches[1];
+        }
+        
+        // Count processing results
+        $progress['synced'] += preg_match_all('/\bOK\s*\(/i', $output, $m);
+        $progress['skipped'] += preg_match_all('/\bSKIP\s*\(/i', $output, $m);
+        $progress['errors'] += preg_match_all('/\bERROR\s*\(/i', $output, $m);
+        $progress['processed'] = $progress['synced'] + $progress['skipped'] + $progress['errors'];
+        
+        // Check for final summary
+        if (preg_match('/Total devices:\s*(\d+)/i', $output, $matches)) {
+            $progress['total'] = (int)$matches[1];
+        }
+        if (preg_match('/Synced:\s*(\d+)/i', $output, $matches)) {
+            $progress['synced'] = (int)$matches[1];
+        }
+        if (preg_match('/Skipped:\s*(\d+)/i', $output, $matches)) {
+            $progress['skipped'] = (int)$matches[1];
+        }
+        if (preg_match('/Errors:\s*(\d+)/i', $output, $matches)) {
+            $progress['errors'] = (int)$matches[1];
+        }
+        
+        return $progress;
+    }
+    
+    /**
+     * Get current sync status from cache
+     */
+    private function getSyncStatus()
+    {
+        try {
+            $cache_value = \munkireport\models\Cache::select('value')
+                ->where('module', 'applecare')
+                ->where('property', 'sync_status')
+                ->value('value');
+            
+            if ($cache_value) {
+                return json_decode($cache_value, true);
+            }
+        } catch (\Exception $e) {
+            error_log('AppleCare: Failed to get sync status: ' . $e->getMessage());
+        }
+        return null;
+    }
+    
+    /**
+     * Clear sync status
+     */
+    public function clear_sync_status()
+    {
+        // Check authorization
+        if (! $this->authorized('global')) {
+            $this->jsonError('Not authorized - admin access required', 403);
+            return;
+        }
+        
+        try {
+            // Get status to find log file
+            $status = $this->getSyncStatus();
+            if ($status && isset($status['log_file']) && file_exists($status['log_file'])) {
+                @unlink($status['log_file']);
+            }
+            
+            \munkireport\models\Cache::where('module', 'applecare')
+                ->where('property', 'sync_status')
+                ->delete();
+                
+            jsonView(['success' => true]);
+        } catch (\Exception $e) {
+            $this->jsonError('Failed to clear sync status: ' . $e->getMessage(), 500);
+        }
     }
 
     /**
@@ -546,6 +1486,15 @@ class Applecare_controller extends Module_controller
         
         try {
             $this->setStopFlag(true);
+            
+            // Also mark sync as not running so it can be restarted
+            $status = $this->getSyncStatus();
+            if ($status) {
+                $status['running'] = false;
+                $status['stopped_at'] = time();
+                $this->saveSyncStatus($status);
+            }
+            
             jsonView([
                 'success' => true,
                 'message' => 'Stop signal sent. The sync will stop after processing the current device.'
@@ -619,6 +1568,15 @@ class Applecare_controller extends Module_controller
         
         try {
             $this->clearProgress();
+            
+            // Also clear sync_status (used by chunked sync)
+            \munkireport\models\Cache::where('module', 'applecare')
+                ->where('property', 'sync_status')
+                ->delete();
+            
+            // Clear stop flag
+            $this->clearStopFlag();
+            
             jsonView([
                 'success' => true,
                 'message' => 'Sync progress has been reset. The next sync will start from the beginning.'
@@ -633,11 +1591,16 @@ class Applecare_controller extends Module_controller
      * Stream sync output in real-time using Server-Sent Events
      * Calls sync logic directly without proc_open
      */
-    private function syncStream()
+    private function syncStream($excludeExisting = null)
     {
         // Disable PHP execution time limit for long-running sync
         set_time_limit(0);
         ini_set('max_execution_time', '0');
+        
+        // Disable buffering/compression for IIS/SSE compatibility
+        ini_set('output_buffering', 'off');
+        ini_set('zlib.output_compression', '0');
+        ini_set('implicit_flush', '1');
         
         // Release session lock to prevent blocking other requests
         if (session_status() === PHP_SESSION_ACTIVE) {
@@ -649,19 +1612,48 @@ class Applecare_controller extends Module_controller
         header('Cache-Control: no-cache');
         header('Connection: keep-alive');
         header('X-Accel-Buffering: no'); // Disable nginx buffering
+        header('Content-Encoding: none');
 
         // Flush output immediately
-        if (ob_get_level()) {
-            ob_end_clean();
+        while (ob_get_level() > 0) {
+            ob_end_flush();
         }
         flush();
+        
+        // Register shutdown handler to surface fatal errors in the UI
+        $self = $this;
+        register_shutdown_function(function() use ($self) {
+            $error = error_get_last();
+            if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+                $message = sprintf(
+                    'Fatal error: %s in %s on line %s',
+                    $error['message'] ?? 'Unknown error',
+                    $error['file'] ?? 'unknown file',
+                    $error['line'] ?? 'unknown line'
+                );
+                $self->sendEvent('error', $message);
+                $self->sendEvent('complete', [
+                    'exit_code' => 1,
+                    'success' => false
+                ]);
+            }
+        });
+        
+        // Emit padding to force IIS to flush headers and start the stream
+        echo ":" . str_repeat(' ', 2048) . "\n\n";
+        flush();
+        
+        // Emit an initial message so the UI confirms the stream started
+        $this->sendEvent('output', 'SSE stream initialized. Starting sync...');
 
         try {
             // Clear any existing stop flag when starting a new sync
             $this->clearStopFlag();
             
             // Check if we should exclude existing records
-            $excludeExisting = isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1';
+            if ($excludeExisting === null) {
+                $excludeExisting = isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1';
+            }
             
             // Check for existing progress (resume from previous sync)
             $existingProgress = $this->loadProgress();
@@ -777,6 +1769,9 @@ class Applecare_controller extends Module_controller
         }
 
         $outputCallback("✓ Generating access token from client assertion...");
+
+        $ssl_verify = getenv('APPLECARE_SSL_VERIFY');
+        $ssl_verify = ($ssl_verify === 'false' || $ssl_verify === '0' || $ssl_verify === 'no') ? false : true;
         
         // Generate access token
         $ch = curl_init('https://account.apple.com/auth/oauth2/token');
@@ -795,7 +1790,8 @@ class Applecare_controller extends Module_controller
                 'client_assertion' => $client_assertion,
                 'scope' => $scope
             ]),
-            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYPEER => $ssl_verify,
+            CURLOPT_SSL_VERIFYHOST => $ssl_verify ? 2 : 0,
             CURLOPT_TIMEOUT => 30,
         ]);
 
@@ -1723,7 +2719,7 @@ class Applecare_controller extends Module_controller
             require_once __DIR__ . '/lib/applecare_helper.php';
             $helper = new \munkireport\module\applecare\Applecare_helper();
             return $helper->syncSerial($serial_number);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return ['success' => false, 'records' => 0, 'message' => 'Sync failed: ' . $e->getMessage()];
         }
     }
@@ -1735,28 +2731,34 @@ class Applecare_controller extends Module_controller
      */
     public function sync_serial($serial_number = '')
     {
-        if (empty($serial_number)) {
-            return $this->jsonError('Serial number is required', 400);
-        }
+        try {
+            if (empty($serial_number)) {
+                return $this->jsonError('Serial number is required', 400);
+            }
 
-        // Validate serial number
-        if (strlen($serial_number) < 8) {
-            return $this->jsonError('Invalid serial number', 400);
-        }
+            // Validate serial number
+            if (strlen($serial_number) < 8) {
+                return $this->jsonError('Invalid serial number', 400);
+            }
 
-        $result = $this->syncSerialInternal($serial_number);
-        
-        if ($result['success']) {
-            jsonView([
-                'success' => true,
-                'message' => "Synced {$result['records']} coverage record(s)",
-                'records' => $result['records']
-            ]);
-        } else {
-            jsonView([
-                'success' => false,
-                'message' => $result['message']
-            ]);
+            $result = $this->syncSerialInternal($serial_number);
+            
+            if ($result['success']) {
+                jsonView([
+                    'success' => true,
+                    'message' => "Synced {$result['records']} coverage record(s)",
+                    'records' => $result['records']
+                ]);
+            } else {
+                jsonView([
+                    'success' => false,
+                    'message' => $result['message']
+                ]);
+            }
+        } catch (\Throwable $e) {
+            error_log('AppleCare sync_serial error: ' . $e->getMessage());
+            error_log('AppleCare sync_serial trace: ' . $e->getTraceAsString());
+            return $this->jsonError('Sync failed: ' . $e->getMessage(), 500);
         }
     }
 
@@ -1995,7 +2997,7 @@ class Applecare_controller extends Module_controller
         }
         
         // Check reseller config file status
-        $config_path = $this->normalizePath(APP_ROOT . '/local/module_configs/applecare_resellers.yml');
+        $config_path = $this->getLocalPath() . DIRECTORY_SEPARATOR . 'module_configs' . DIRECTORY_SEPARATOR . 'applecare_resellers.yml';
         $data['reseller_config'] = [
             'exists' => file_exists($config_path),
             'readable' => is_readable($config_path),
@@ -2033,7 +3035,9 @@ class Applecare_controller extends Module_controller
      */
     public function get_device_count()
     {
-        $excludeExisting = isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1';
+        // Check both POST and GET for flexibility
+        $excludeExisting = (isset($_POST['exclude_existing']) && $_POST['exclude_existing'] === '1') ||
+                           (isset($_GET['exclude_existing']) && $_GET['exclude_existing'] === '1');
         
         try {
             // Use Eloquent Query Builder for device list via Machine_model
