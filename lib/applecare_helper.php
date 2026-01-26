@@ -178,11 +178,37 @@ class Applecare_helper
      */
     private function normalizePath($path)
     {
-        // Replace backslashes with forward slashes (Windows compatibility)
-        $path = str_replace('\\', '/', $path);
-        // Remove double slashes
-        $path = preg_replace('#/+#', '/', $path);
+        // Normalize to OS-appropriate directory separator
+        $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+        // Remove duplicate separators
+        $pattern = DIRECTORY_SEPARATOR === '\\' ? '#\\\\+#' : '#/+#';
+        $path = preg_replace($pattern, DIRECTORY_SEPARATOR, $path);
         return $path;
+    }
+
+    /**
+     * Get the local directory path (supports LOCAL_DIRECTORY_PATH env variable)
+     *
+     * @return string Local directory path
+     */
+    private function getLocalPath()
+    {
+        $local_path = getenv('LOCAL_DIRECTORY_PATH');
+        if ($local_path) {
+            return $this->normalizePath($local_path);
+        }
+        return $this->normalizePath(APP_ROOT . '/local');
+    }
+
+    /**
+     * Determine SSL verification behavior for curl.
+     *
+     * @return bool
+     */
+    private function getSslVerify()
+    {
+        $ssl_verify = getenv('APPLECARE_SSL_VERIFY');
+        return !($ssl_verify === 'false' || $ssl_verify === '0' || $ssl_verify === 'no');
     }
 
     /**
@@ -197,7 +223,7 @@ class Applecare_helper
             return null;
         }
 
-        $config_path = $this->normalizePath(APP_ROOT . '/local/module_configs/applecare_resellers.yml');
+        $config_path = $this->getLocalPath() . DIRECTORY_SEPARATOR . 'module_configs' . DIRECTORY_SEPARATOR . 'applecare_resellers.yml';
         if (!file_exists($config_path)) {
             error_log('AppleCare: Reseller config file not found at: ' . $config_path);
             return $reseller_id;
@@ -234,7 +260,7 @@ class Applecare_helper
                     return $value;
                 }
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             error_log('AppleCare: Error loading reseller config from ' . $config_path . ': ' . $e->getMessage());
             error_log('AppleCare: Exception trace: ' . $e->getTraceAsString());
         }
@@ -272,6 +298,7 @@ class Applecare_helper
         }
 
         $ch = curl_init('https://account.apple.com/auth/oauth2/token');
+        $ssl_verify = $this->getSslVerify();
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => true, // Include headers in response
@@ -287,7 +314,8 @@ class Applecare_helper
                 'client_assertion' => $client_assertion,
                 'scope' => $scope
             ]),
-            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYPEER => $ssl_verify,
+            CURLOPT_SSL_VERIFYHOST => $ssl_verify ? 2 : 0,
             CURLOPT_TIMEOUT => 30,
         ]);
 
@@ -345,6 +373,7 @@ class Applecare_helper
             $outputCallback = function($message, $isError = false) {};
         }
 
+        $ssl_verify = $this->getSslVerify();
         $requests = 0;
         $device_info = [];
         $device_attrs = [];
@@ -362,7 +391,8 @@ class Applecare_helper
             'Content-Type: application/json',
         ]);
         curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $ssl_verify);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $ssl_verify ? 2 : 0);
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
 
@@ -425,7 +455,8 @@ class Applecare_helper
                             'Content-Type: application/json',
                         ]);
                         curl_setopt($mdm_ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-                        curl_setopt($mdm_ch, CURLOPT_SSL_VERIFYPEER, true);
+                        curl_setopt($mdm_ch, CURLOPT_SSL_VERIFYPEER, $ssl_verify);
+                        curl_setopt($mdm_ch, CURLOPT_SSL_VERIFYHOST, $ssl_verify ? 2 : 0);
                         curl_setopt($mdm_ch, CURLOPT_TIMEOUT, 30);
                         curl_setopt($mdm_ch, CURLOPT_CONNECTTIMEOUT, 10);
                         
@@ -542,7 +573,8 @@ class Applecare_helper
             'Content-Type: application/json',
         ]);
         curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $ssl_verify);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $ssl_verify ? 2 : 0);
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
 
@@ -573,7 +605,8 @@ class Applecare_helper
                     'Content-Type: application/json',
                 ]);
                 curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $ssl_verify);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $ssl_verify ? 2 : 0);
                 curl_setopt($ch, CURLOPT_TIMEOUT, 30);
                 
                 $response = curl_exec($ch);
@@ -1022,7 +1055,7 @@ class Applecare_helper
 
             $access_token = $this->generateAccessToken($client_assertion, $api_base_url);
             return $this->syncSingleDevice($serial_number, $api_base_url, $access_token);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return ['success' => false, 'records' => 0, 'message' => 'Sync failed: ' . $e->getMessage()];
         }
     }
