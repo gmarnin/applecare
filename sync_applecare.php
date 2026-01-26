@@ -32,6 +32,8 @@ if (empty($munkireport_root)) {
         '/usr/local/munkireport',                 // Standard install location
         dirname(__DIR__, 4),                      // If module is inside munkireport
         '/var/www/munkireport',                   // Common web install location
+        'D:\\inetpub\\macupdates\\munkireport-php', // Windows IIS default location
+        'C:\\inetpub\\munkireport',               // Windows IIS alternative
     ];
 
     foreach ($search_paths as $path) {
@@ -76,6 +78,9 @@ echo "================================================\n\n";
 $api_base_url = getenv('APPLECARE_API_URL');
 $client_assertion = getenv('APPLECARE_CLIENT_ASSERTION');
 $rate_limit = (int)getenv('APPLECARE_RATE_LIMIT') ?: 40;
+$ssl_verify = getenv('APPLECARE_SSL_VERIFY');
+// Default to true, but allow disabling for self-signed certificates
+$ssl_verify = ($ssl_verify === 'false' || $ssl_verify === '0' || $ssl_verify === 'no') ? false : true;
 
 if (empty($client_assertion)) {
     die("ERROR: APPLECARE_CLIENT_ASSERTION not set in .env file\n");
@@ -98,6 +103,10 @@ if (substr($api_base_url, -1) !== '/') {
 echo "✓ Configuration OK\n";
 echo "✓ API URL: $api_base_url\n";
 echo "✓ Rate Limit: $rate_limit calls per minute\n";
+if (!$ssl_verify) {
+    echo "⚠ WARNING: SSL certificate verification is DISABLED\n";
+    echo "  This is insecure and should only be used for testing or with self-signed certificates\n";
+}
 
 // Validate and extract client ID from assertion
 // JWT format: header.payload.signature (3 parts separated by dots)
@@ -152,7 +161,8 @@ try {
             'client_assertion' => $client_assertion,
             'scope' => $scope
         ]),
-        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYPEER => $ssl_verify,
+        CURLOPT_SSL_VERIFYHOST => $ssl_verify ? 2 : 0,
         CURLOPT_TIMEOUT => 30,
     ]);
 
@@ -183,20 +193,58 @@ try {
 }
 
 echo "\n";
+flush();
+echo "Initializing database connection...\n";
+flush();
 
-// Initialize database connection using Capsule (following MunkiReport CLI pattern)
+// Initialize database connection
 try {
-    $connection = conf('connection');
-    
-    $capsule = new Capsule();
-    $capsule->addConnection($connection);
+    $db_config = [
+        'driver' => getenv('CONNECTION_DRIVER') ?: 'sqlite',
+        'database' => getenv('CONNECTION_DATABASE') ?: $munkireport_root . '/app/db/db.sqlite',
+        'host' => getenv('CONNECTION_HOST') ?: 'localhost',
+        'username' => getenv('CONNECTION_USERNAME') ?: '',
+        'password' => getenv('CONNECTION_PASSWORD') ?: '',
+        'charset' => 'utf8',
+        'collation' => 'utf8_unicode_ci',
+        'prefix' => '',
+    ];
+
+    echo "  Driver: " . $db_config['driver'] . "\n";
+    flush();
+    if ($db_config['driver'] === 'sqlite') {
+        echo "  Database file: " . $db_config['database'] . "\n";
+        flush();
+        if (!file_exists($db_config['database'])) {
+            throw new Exception("Database file does not exist: " . $db_config['database']);
+        }
+        if (!is_readable($db_config['database'])) {
+            throw new Exception("Database file is not readable: " . $db_config['database']);
+        }
+    } else {
+        echo "  Host: " . $db_config['host'] . "\n";
+        flush();
+    }
+
+    echo "  Creating database connection...\n";
+    flush();
+    $capsule = new \Illuminate\Database\Capsule\Manager;
+    $capsule->addConnection($db_config);
+    echo "  Setting as global...\n";
+    flush();
     $capsule->setAsGlobal();
+    echo "  Booting Eloquent...\n";
+    flush();
     $capsule->bootEloquent();
 
     echo "✓ Database connected\n\n";
+    flush();
 } catch (Exception $e) {
     die("ERROR: Could not connect to database: " . $e->getMessage() . "\n");
 }
+
+// Check for --exclude-existing flag
+$excludeExisting = in_array('--exclude-existing', $argv);
 
 // Get all devices
 echo "Fetching device list from database...\n";
@@ -207,7 +255,27 @@ $devices = Machine_model::select('serial_number')
     ->get();
 
 $total_devices = count($devices);
-echo "✓ Found $total_devices devices\n\n";
+
+// If excluding existing, filter out devices that already have AppleCare records
+if ($excludeExisting) {
+    $existingSerials = Applecare_model::select('serial_number')
+        ->distinct()
+        ->pluck('serial_number')
+        ->toArray();
+    
+    $originalCount = $total_devices;
+    $devices = $devices->filter(function($device) use ($existingSerials) {
+        return !in_array($device->serial_number, $existingSerials);
+    });
+    $total_devices = count($devices);
+    $excludedCount = $originalCount - $total_devices;
+    
+    echo "✓ Found $originalCount devices total\n";
+    echo "  Excluding $excludedCount device(s) that already have AppleCare records\n";
+    echo "✓ $total_devices devices to process\n\n";
+} else {
+    echo "✓ Found $total_devices devices\n\n";
+}
 
 if ($total_devices == 0) {
     die("No devices found in database. Devices must check in to MunkiReport first.\n");
@@ -428,7 +496,8 @@ foreach ($devices as $device) {
 
         // Force HTTP/1.1 to avoid HTTP/2 protocol issues
         curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $ssl_verify);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $ssl_verify ? 2 : 0);
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
 
@@ -461,7 +530,8 @@ foreach ($devices as $device) {
                     'Content-Type: application/json',
                 ]);
                 curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $ssl_verify);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $ssl_verify ? 2 : 0);
                 curl_setopt($ch, CURLOPT_TIMEOUT, 30);
                 
                 $response = curl_exec($ch);
