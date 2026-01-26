@@ -62,7 +62,7 @@
     var $deviceCountDisplay = $('#device-count-display');
     var $output = $('#sync-output');
     var $completionMsg = $('#sync-completion-message');
-    var eventSource = null;
+    // Polling-based sync (IIS compatible - no SSE)
     var outputBuffer = '';
     var errorCount = 0;
     var skippedCount = 0;
@@ -155,33 +155,37 @@
     function updateDeviceCount() {
         var excludeExisting = $excludeCheckbox.is(':checked');
         var url = appUrl + '/module/applecare/get_device_count';
-        if (excludeExisting) {
-            url += '?exclude_existing=1';
-        }
         
-        $.getJSON(url, function(data) {
-            if (data.count !== undefined) {
-                var count = data.count;
-                var text = count + ' device' + (count !== 1 ? 's' : '');
-                if (excludeExisting) {
-                    text += ' (excluding devices with existing records)';
-                }
-                $deviceCountDisplay.text(text);
-                
-                // Calculate and display estimated time using configured rate limit
-                if (count > 0) {
-                    var estimatedSeconds = Math.ceil((count / devicesPerMinute) * 60);
-                    updateEstimatedTime(estimatedSeconds, count);
+        $.ajax({
+            url: url,
+            method: 'POST',
+            data: { exclude_existing: excludeExisting ? '1' : '0' },
+            dataType: 'json',
+            success: function(data) {
+                if (data.count !== undefined) {
+                    var count = data.count;
+                    var text = count + ' device' + (count !== 1 ? 's' : '');
+                    if (excludeExisting) {
+                        text += ' (excluding devices with existing records)';
+                    }
+                    $deviceCountDisplay.text(text);
+                    
+                    // Calculate and display estimated time using configured rate limit
+                    if (count > 0) {
+                        var estimatedSeconds = Math.ceil((count / devicesPerMinute) * 60);
+                        updateEstimatedTime(estimatedSeconds, count);
+                    } else {
+                        updateEstimatedTime(0, 0);
+                    }
                 } else {
+                    $deviceCountDisplay.text('Unable to load count');
                     updateEstimatedTime(0, 0);
                 }
-            } else {
+            },
+            error: function() {
                 $deviceCountDisplay.text('Unable to load count');
                 updateEstimatedTime(0, 0);
             }
-        }).fail(function() {
-            $deviceCountDisplay.text('Unable to load count');
-            updateEstimatedTime(0, 0);
         });
     }
 
@@ -334,44 +338,32 @@
     }
 
     function stopSync(){
-        if (eventSource) {
-            eventSource.close();
-            eventSource = null;
-        }
+        stopPolling();
+        syncRunning = false;
         $btn.prop('disabled', false);
         $excludeCheckbox.prop('disabled', false);
         $('#stop-sync').hide();
         $('#reset-progress').prop('disabled', false);
-        
-        // Reset auto-resume state when manually stopped
-        if (typeof resetAutoResumeState === 'function') {
-            resetAutoResumeState();
-        }
     }
 
+    var pollTimer = null;
+    var syncRunning = false;
+    
     function startSync() {
         // Prevent multiple simultaneous syncs
-        if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+        if (syncRunning) {
             return;
         }
 
         var excludeExisting = $excludeCheckbox.is(':checked');
         
-        // Reset auto-resume state on manual start (not auto-resume)
-        if ($status.text() !== 'Auto-resuming...') {
-            resetAutoResumeState();
-        }
-        
         $btn.prop('disabled', true);
         $excludeCheckbox.prop('disabled', true);
         $('#stop-sync').show();
         $('#reset-progress').prop('disabled', true);
-        $status.text('Running…');
+        $status.text('Starting…');
         
-        // Don't clear output on auto-resume to preserve history
-        if (autoResumeAttempts === 0) {
-            clearOutput();
-        }
+        clearOutput();
         
         if (excludeExisting) {
             appendOutput('Starting AppleCare sync (excluding devices with existing records)...\n');
@@ -382,280 +374,195 @@
         // Show progress bar immediately (will be updated with actual counts)
         $('#sync-progress').removeClass('hide');
 
-        // Use Server-Sent Events for real-time streaming
-        var url = appUrl + '/module/applecare/sync?stream=1';
-        if (excludeExisting) {
-            url += '&exclude_existing=1';
+        // Start sync via AJAX (polling-based approach for IIS compatibility)
+        var url = appUrl + '/module/applecare/startsync';
+        
+        console.log('Starting sync, URL:', url);
+        console.log('Exclude existing checked:', excludeExisting);
+        appendOutput('Exclude existing: ' + (excludeExisting ? 'YES' : 'NO') + '\n');
+        
+        $.ajax({
+            url: url,
+            method: 'POST',
+            data: { exclude_existing: excludeExisting ? '1' : '0' },
+            dataType: 'json',
+            success: function(data) {
+                console.log('startsync response:', data);
+                
+                if (data.success) {
+                    syncRunning = true;
+                    $status.text('Running…');
+                    
+                    // Display initial output
+                    if (data.output) {
+                        appendOutput(data.output + '\n');
+                    }
+                    
+                    // Set total devices if provided
+                    if (data.total) {
+                        totalDevices = data.total;
+                        $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
+                    }
+                    
+                    // Check if already complete (no devices to process)
+                    if (data.complete) {
+                        $status.text('Finished');
+                        showCompletionMessage(true, {});
+                        stopSync();
+                        return;
+                    }
+                    
+                    // Start processing chunks
+                    startPolling();
+                } else {
+                    appendOutput('ERROR: ' + (data.message || 'Failed to start sync') + '\n');
+                    if (data.output) {
+                        appendOutput(data.output + '\n');
+                    }
+                    $status.text('Failed');
+                    stopSync();
+                }
+            },
+            error: function(xhr, status, error) {
+                console.log('startsync error:', status, error, xhr.responseText);
+                appendOutput('ERROR: Failed to start sync - ' + error + '\n');
+                $status.text('Failed');
+                stopSync();
+            }
+        });
+    }
+    
+    function startPolling() {
+        // Poll every 2 seconds
+        pollTimer = setInterval(function() {
+            pollSyncOutput();
+        }, 2000);
+        
+        // Also poll immediately
+        pollSyncOutput();
+    }
+    
+    function stopPolling() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
         }
-        eventSource = new EventSource(url);
-
-        eventSource.onopen = function() {
-            appendOutput('Connected to sync process...\n');
-        };
-
-        eventSource.addEventListener('resume', function(e) {
-            var resumeData = JSON.parse(e.data);
-            totalDevices = resumeData.total || 0;
-            processedDevices = resumeData.processed || 0;
-            
+    }
+    
+    function pollSyncOutput() {
+        console.log('Processing next chunk...');
+        $.ajax({
+            url: appUrl + '/module/applecare/syncchunk',
+            method: 'GET',
+            dataType: 'json',
+            success: function(data) {
+                console.log('Chunk response:', data);
+                
+                // Display output from this chunk
+                if (data.output && data.output.length > 0) {
+                    appendOutput(data.output);
+                }
+                
+                // Update progress
+                if (data.progress) {
+                    if (data.progress.total > 0) {
+                        totalDevices = data.progress.total;
+                        $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
+                    }
+                    
+                    processedDevices = data.progress.processed || 0;
+                    syncedCount = data.progress.synced || 0;
+                    skippedCount = data.progress.skipped || 0;
+                    errorCount = data.progress.errors || 0;
+                    
+                    updateProgress();
+                    
+                    // Update estimated time
+                    if (totalDevices > 0) {
+                        var remainingDevices = totalDevices - processedDevices;
+                        if (remainingDevices > 0) {
+                            var estimatedSeconds = Math.ceil((remainingDevices / devicesPerMinute) * 60);
+                            updateEstimatedTime(estimatedSeconds, remainingDevices);
+                        } else {
+                            updateEstimatedTime(0, 0);
+                        }
+                    }
+                }
+                
+                if (data.complete || !data.running) {
+                    // Sync finished
+                    console.log('Sync complete');
+                    stopPolling();
+                    syncRunning = false;
+                    
+                    var success = errorCount === 0;
+                    $status.text(success ? 'Finished' : 'Finished with errors');
+                    showCompletionMessage(success, {});
+                    
+                    // Hide progress bar with fade
+                    if (totalDevices > 0) {
+                        $("#sync-progress").fadeOut(1200, function() {
+                            $('#sync-progress').addClass('hide');
+                            var progresselement = document.getElementById('sync-progress');
+                            if (progresselement) {
+                                progresselement.style.display = null;
+                                progresselement.style.opacity = null;
+                            }
+                            $('#sync-progress .progress-bar').css('width', '0%').attr('aria-valuenow', 0);
+                        });
+                    }
+                    
+                    // Clear sync status on server
+                    $.ajax({
+                        url: appUrl + '/module/applecare/clear_sync_status',
+                        method: 'POST'
+                    });
+                    
+                    stopSync();
+                } else if (data.waiting) {
+                    // Rate limiting - wait before next request
+                    console.log('Rate limiting, waiting ' + data.wait_time + 's');
+                }
+            },
+            error: function(xhr, status, error) {
+                console.log('Chunk error:', error, xhr.responseText);
+                appendOutput('ERROR: Chunk processing failed - ' + error + '\n');
+            }
+        });
+    }
+    
+    function processOutput(output) {
+        // Extract total devices count from "Found X devices" message
+        var foundMatch = output.match(/Found\s+(\d+)\s+devices/i);
+        if (foundMatch && totalDevices === 0) {
+            totalDevices = parseInt(foundMatch[1]) || 0;
             if (totalDevices > 0) {
                 $('#sync-progress').removeClass('hide');
                 $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
-                updateProgress();
-                
-                // Update estimated time for remaining devices
-                var remaining = resumeData.remaining || 0;
-                if (remaining > 0) {
-                    var estimatedSeconds = Math.ceil((remaining / devicesPerMinute) * 60);
-                    updateEstimatedTime(estimatedSeconds, remaining);
-                }
             }
-        });
-
-        eventSource.addEventListener('output', function(e) {
-            var data = e.data;
-            // Unescape newlines
-            data = data.replace(/\\n/g, '\n');
-            
-            // Handle RESUME_INFO control message
-            var resumeInfoMatch = data.match(/RESUME_INFO:(\d+):(\d+):(\d+)/);
-            if (resumeInfoMatch) {
-                totalDevices = parseInt(resumeInfoMatch[1]) || 0;
-                processedDevices = parseInt(resumeInfoMatch[2]) || 0;
-                var remaining = parseInt(resumeInfoMatch[3]) || 0;
-                
-                if (totalDevices > 0) {
-                    $('#sync-progress').removeClass('hide');
-                    $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
-                    updateProgress();
-                    
-                    // Update estimated time for remaining devices
-                    if (remaining > 0) {
-                        var estimatedSeconds = Math.ceil((remaining / devicesPerMinute) * 60);
-                        updateEstimatedTime(estimatedSeconds, remaining);
-                    }
-                }
-                
-                // Remove RESUME_INFO from output
-                data = data.replace(/RESUME_INFO:\d+:\d+:\d+\n?/g, '');
-            }
-            
-            // Remove ESTIMATED_TIME control messages from output (we calculate on frontend now)
-            data = data.replace(/ESTIMATED_TIME:\d+:\d+\n?/g, '');
-            
-            // Only append if there's still content
-            if (data.trim().length > 0) {
-                appendOutput(data);
-            }
-            
-            // Parse progress information
-            // Extract total devices count from "Found X devices" message (appears early)
-            var foundMatch = data.match(/Found\s+(\d+)\s+devices/i);
-            if (foundMatch) {
-                // Only set if we haven't already set it from resume
-                if (totalDevices === 0) {
-                    totalDevices = parseInt(foundMatch[1]) || 0;
-                    if (totalDevices > 0) {
-                        $('#sync-progress').removeClass('hide');
-                        $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
-                        updateProgress();
-                    }
-                }
-            }
-            
-            // Also check "Total devices" message (appears at end)
-            var totalMatch = data.match(/Total devices:\s*(\d+)/i);
-            if (totalMatch) {
-                totalDevices = parseInt(totalMatch[1]) || totalDevices;
-                if (totalDevices > 0 && $('#sync-progress').hasClass('hide')) {
-                    $('#sync-progress').removeClass('hide');
-                    $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
-                }
-            }
-            
-            // Extract device index from heartbeat messages
-            // Heartbeat shows absolute position (e.g., "Processing device 150 of 700")
-            var heartbeatMatch = data.match(/Processing device\s+(\d+)\s+of\s+(\d+)/i);
-            if (heartbeatMatch) {
-                var heartbeatPosition = parseInt(heartbeatMatch[1]) || 0;
-                var heartbeatTotal = parseInt(heartbeatMatch[2]) || totalDevices;
-                
-                // Heartbeat position is 1-indexed, so processed = position - 1
-                processedDevices = Math.max(processedDevices, heartbeatPosition - 1);
-                totalDevices = heartbeatTotal || totalDevices;
-                
-                if (totalDevices > 0 && $('#sync-progress').hasClass('hide')) {
-                    $('#sync-progress').removeClass('hide');
-                    $('#sync-progress .progress-bar').attr('aria-valuemax', totalDevices);
-                }
-                updateProgress();
-            }
-            
-            // Track completed devices - look for result messages (OK, SKIP, ERROR)
-            // These appear after "Processing..." messages
-            var resultMatch = data.match(/\b(OK|SKIP|ERROR)\s*\(/);
-            if (resultMatch) {
-                // Only increment if we haven't already counted this device
-                // (to avoid double counting on resume)
-                if (processedDevices < totalDevices) {
-                    processedDevices++;
-                    updateProgress();
-                }
-            }
-            
-            // Track errors from output messages
-            if (data.indexOf('ERROR') !== -1 || data.indexOf('error') !== -1) {
-                // Count error lines (not just increment once per message)
-                var errorMatches = data.match(/ERROR/gi);
-                if (errorMatches) {
-                    errorCount += errorMatches.length;
-                }
-            }
-        });
-
-        eventSource.addEventListener('error', function(e) {
-            var data = e.data;
-            // Unescape newlines
-            data = data.replace(/\\n/g, '\n');
-            appendOutput('ERROR: ' + data);
-            errorCount++;
-        });
-
-        eventSource.addEventListener('complete', function(e) {
-            var data = JSON.parse(e.data);
-            appendOutput('Exit code: ' + data.exit_code + '\n');
-            appendOutput('================================================\n');
-            
-            $status.text(data.success ? 'Finished' : 'Finished with errors');
-            showCompletionMessage(data.success, data);
-            
-            // Reset auto-resume state on successful completion
-            resetAutoResumeState();
-            
-            // Hide progress bar with fade
-            if (totalDevices > 0) {
-                $("#sync-progress").fadeOut(1200, function() {
-                    $('#sync-progress').addClass('hide');
-                    var progresselement = document.getElementById('sync-progress');
-                    if (progresselement) {
-                        progresselement.style.display = null;
-                        progresselement.style.opacity = null;
-                    }
-                    $('#sync-progress .progress-bar').css('width', '0%').attr('aria-valuenow', 0);
-                });
-            }
-            
-            stopSync();
-        });
-
-        var autoResumeAttempts = 0;
-        var maxAutoResumeAttempts = 10; // Max 10 auto-resume attempts
-        var autoResumeDelay = 5000; // 5 seconds delay before auto-resume
-        var autoResumeStartTime = null; // Track when auto-resume sequence started
-        var lastProcessedCount = 0; // Track last processed device count
-        var lastFailureTime = null; // Track time of last failure
-        var maxAutoResumeDuration = 3600000; // Max 1 hour of auto-resuming (in milliseconds)
-        var minTimeBetweenFailures = 30000; // Min 30 seconds between failures to count as progress
-        
-        function resetAutoResumeState() {
-            autoResumeAttempts = 0;
-            autoResumeStartTime = null;
-            lastProcessedCount = 0;
-            lastFailureTime = null;
         }
         
-        function attemptAutoResume() {
-            var now = Date.now();
-            
-            // Initialize auto-resume start time on first attempt
-            if (autoResumeStartTime === null) {
-                autoResumeStartTime = now;
-            }
-            
-            // Check if we've been auto-resuming for too long
-            if (now - autoResumeStartTime > maxAutoResumeDuration) {
-                appendOutput('\nAuto-resume stopped: Maximum duration (1 hour) exceeded. Please run sync manually.\n');
-                $status.text('Auto-resume timeout');
-                showCompletionMessage(false, {message: 'Auto-resume stopped after 1 hour. Please run sync manually.'});
-                stopSync();
-                resetAutoResumeState();
-                return;
-            }
-            
-            // Check if we're making progress (processed count increased)
-            if (lastFailureTime !== null) {
-                var timeSinceLastFailure = now - lastFailureTime;
-                var currentProcessed = processedDevices || 0;
-                
-                // If we're failing too quickly and not making progress, stop
-                if (timeSinceLastFailure < minTimeBetweenFailures && currentProcessed <= lastProcessedCount) {
-                    appendOutput('\nAuto-resume stopped: No progress detected between failures. Please check connection and run sync manually.\n');
-                    $status.text('Auto-resume stopped');
-                    showCompletionMessage(false, {message: 'Auto-resume stopped: No progress detected. Please run sync manually.'});
-                    stopSync();
-                    resetAutoResumeState();
-                    return;
-                }
-                
-                // Update last processed count if we made progress
-                if (currentProcessed > lastProcessedCount) {
-                    lastProcessedCount = currentProcessed;
-                }
+        // Track completed devices from result messages
+        var okMatches = output.match(/\bOK\s*\(/g);
+        var skipMatches = output.match(/\bSKIP\s*\(/g);
+        var errorMatches = output.match(/\bERROR\s*\(/g);
+        
+        if (okMatches) syncedCount += okMatches.length;
+        if (skipMatches) skippedCount += skipMatches.length;
+        if (errorMatches) errorCount += errorMatches.length;
+        
+        processedDevices = syncedCount + skippedCount + errorCount;
+        
+        // Update estimated time
+        if (totalDevices > 0) {
+            var remainingDevices = totalDevices - processedDevices;
+            if (remainingDevices > 0) {
+                var estimatedSeconds = Math.ceil((remainingDevices / devicesPerMinute) * 60);
+                updateEstimatedTime(estimatedSeconds, remainingDevices);
             } else {
-                lastProcessedCount = processedDevices || 0;
+                updateEstimatedTime(0, 0);
             }
-            
-            // Check max attempts
-            if (autoResumeAttempts >= maxAutoResumeAttempts) {
-                appendOutput('\nMaximum auto-resume attempts (' + maxAutoResumeAttempts + ') reached. Please run sync manually.\n');
-                $status.text('Auto-resume failed');
-                showCompletionMessage(false, {message: 'Connection failed after ' + maxAutoResumeAttempts + ' auto-resume attempts. Please run sync manually.'});
-                stopSync();
-                resetAutoResumeState();
-                return;
-            }
-            
-            autoResumeAttempts++;
-            lastFailureTime = now;
-            appendOutput('\nAuto-resuming sync in ' + (autoResumeDelay / 1000) + ' seconds... (attempt ' + autoResumeAttempts + '/' + maxAutoResumeAttempts + ')\n');
-            $status.text('Auto-resuming...');
-            
-            setTimeout(function() {
-                // Only auto-resume if connection is still closed (not manually stopped)
-                if (!$btn.prop('disabled') || $status.text() === 'Finished' || $status.text() === 'Finished with errors') {
-                    // User manually stopped or sync completed, don't auto-resume
-                    resetAutoResumeState();
-                    return;
-                }
-                appendOutput('Resuming now...\n');
-                // Close old connection if still exists
-                if (eventSource) {
-                    eventSource.close();
-                    eventSource = null;
-                }
-                startSync();
-            }, autoResumeDelay);
         }
-
-        eventSource.onerror = function(e) {
-            if (eventSource.readyState === EventSource.CLOSED) {
-                // Connection closed - sync completed or error occurred
-                if ($status.text() === 'Running…') {
-                    // Unexpected closure - attempt auto-resume
-                    appendOutput('\nConnection closed unexpectedly.\n');
-                    appendOutput('Progress has been saved. Attempting to auto-resume...\n');
-                    attemptAutoResume();
-                } else {
-                    // Normal completion or user stopped
-                    stopSync();
-                }
-            } else {
-                // Connection error - attempt auto-resume
-                appendOutput('\nConnection error occurred.\n');
-                appendOutput('Progress has been saved. Attempting to auto-resume...\n');
-                attemptAutoResume();
-            }
-        };
     }
 
     $btn.on('click', function(){
@@ -680,11 +587,8 @@
                     $stopBtn.html('<i class="fa fa-check"></i> Stop Signal Sent').removeClass('btn-danger').addClass('btn-success');
                     appendOutput('Stop signal sent. Sync will stop after processing current device...\n');
                     
-                    // Close the EventSource connection
-                    if (eventSource) {
-                        eventSource.close();
-                        eventSource = null;
-                    }
+                    // Stop polling
+                    stopPolling();
                     
                     // Update UI
                     setTimeout(function() {
