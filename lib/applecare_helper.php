@@ -322,7 +322,9 @@ class Applecare_helper
     }
 
     /**
-     * @param resource $ch
+     * PHP 7 curl handles are resources. PHP 8 uses CurlHandle.
+     *
+     * @param \CurlHandle|resource $ch
      * @return void
      */
     private function restrictCurlToHttps($ch)
