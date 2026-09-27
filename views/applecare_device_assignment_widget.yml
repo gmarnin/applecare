@@ -2,16 +2,19 @@ type: button
 widget_id: applecare-device-assignment-widget
 api_url: /module/applecare/get_binary_widget/device_assignment_status
 i18n_title: applecare.widget.device_assignment_title
-i18n_tooltip: "Shows device assignment status from Apple Business Manager. Green indicates assigned, yellow indicates unassigned, red indicates released."
+i18n_tooltip: "Shows device assignment status from Apple Business Manager. Green indicates assigned, yellow indicates unassigned, red indicates released, grey indicates unknown."
 icon: fa-sitemap
 listing_link: /show/listing/applecare/applecare
 buttons:
   - label: Released
     class: btn-danger
-    search_component: is_primary=1&device_assignment_status=DEVICE_ASSIGNMENT_UNKNOWN
+    search_component: is_primary=1&device_assignment_status=RELEASED
   - label: Unassigned
     class: btn-warning
     search_component: is_primary=1&device_assignment_status=unassigned
   - label: Assigned
     class: btn-success
     search_component: is_primary=1&device_assignment_status=assigned
+  - label: Unknown
+    class: btn-default
+    search_component: is_primary=1&device_assignment_status=DEVICE_ASSIGNMENT_UNKNOWN

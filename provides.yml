@@ -2,6 +2,7 @@ client_tabs:
     applecare:
         view: applecare_tab
         i18n: applecare.title
+        badge: applecare-cnt
 listings:
     applecare:
         view: applecare_listing

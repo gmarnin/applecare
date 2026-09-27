@@ -5,6 +5,7 @@ i18n_title: applecare.widget.paymentType_title
 i18n_tooltip: "Shows AppleCare payment types across all devices."
 icon: fa-money
 listing_link: /show/listing/applecare/applecare
+search_prefix: "is_primary=1&paymentType="
 search_key: label
 badge: count
 i18n_empty_result: no_data

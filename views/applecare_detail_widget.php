@@ -1,5 +1,5 @@
 <div class="col-lg-4">
-    <h4><i class="fa fa-medkit"></i> <span data-i18n="applecare.title"></span></h4>
+    <h4><i class="fa fa-medkit"></i> <span data-i18n="applecare.title"></span><a data-toggle="tab" title="AppleCare" class="btn btn-xs pull-right" href="#applecare" aria-expanded="false"><i class="fa fa-arrow-right"></i></a></h4>
     <table id="applecare_status-data" class="table"></table>
 </div>
 
@@ -7,7 +7,27 @@
 <script>
 $(document).on('appReady', function () {
 
-    $.getJSON(appUrl + '/module/applecare/get_data/' + serialNumber, function (data) {
+    window.getAppleCareDetailData = window.getAppleCareDetailData || function(force) {
+        if (force) {
+            window.mrAppleCareDetailData = null;
+            window.mrAppleCareDetailPromise = null;
+        }
+        if (window.mrAppleCareDetailData !== undefined && window.mrAppleCareDetailData !== null && !force) {
+            return $.Deferred().resolve(window.mrAppleCareDetailData).promise();
+        }
+        if (!window.mrAppleCareDetailPromise) {
+            window.mrAppleCareDetailPromise = $.getJSON(appUrl + '/module/applecare/get_data/' + serialNumber)
+                .done(function(data) {
+                    window.mrAppleCareDetailData = data;
+                })
+                .fail(function() {
+                    window.mrAppleCareDetailPromise = null;
+                });
+        }
+        return window.mrAppleCareDetailPromise;
+    };
+
+    window.getAppleCareDetailData().done(function (data) {
 
         var table = $('#applecare_status-data');
         table.empty();

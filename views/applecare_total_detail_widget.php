@@ -17,7 +17,11 @@ $(document).on('appReady', function(){
     // Add tooltip to panel heading
     $('#applecare-widget>div.panel-heading')
         .attr('title', i18n.t('applecare.widget_tooltip'))
-        .tooltip();
+        .tooltip({
+            placement: 'top',
+            container: 'body',
+            trigger: 'hover'
+        });
 });
 
 $(document).on('appUpdate', function(e, lang) {
@@ -31,6 +35,12 @@ $(document).on('appUpdate', function(e, lang) {
 
         var panel = $('#applecare-widget div.panel-body'),
             baseUrl = appUrl + '/show/listing/applecare/applecare#';
+        panel.find('[data-toggle="tooltip"]').each(function() {
+            var $tip = $(this);
+            if ($tip.data('bs.tooltip')) {
+                $tip.tooltip('hide').tooltip('destroy');
+            }
+        });
         panel.empty();
 
         // Inactive/Expired: is_primary=1 and coverage_status=inactive
@@ -68,9 +78,13 @@ $(document).on('appUpdate', function(e, lang) {
             .append('<br>')
             .append(document.createTextNode(i18n.t('applecare.active')));
         panel.append(activeLink);
-
+        
         // Initialize tooltips
-        panel.find('[data-toggle="tooltip"]').tooltip();
+        panel.find('[data-toggle="tooltip"]').tooltip({
+            placement: 'top',
+            container: 'body',
+            trigger: 'hover'
+        });
     });
 });
 

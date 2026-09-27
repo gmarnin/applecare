@@ -4,12 +4,14 @@ This module requires Apple Business Manager or Apple School Manager API (AxM) cr
 
 ### Features
 
-* Automatic client-side syncing every 10-14 days (randomized interval)
+* Automatic client check-in about once an hour. The server calls Apple when the last completed fetch is older than APPLECARE_SYNC_INTERVAL_DAYS (default is 7) plus 0–11 hours from the serial
 * Manual sync options (individual device or bulk)
 * Real-time progress tracking on admin page
 * Multi-organization support via machine group key or Munki ClientID prefixes
 * Intelligent rate limiting with HTTP 429 handling
 * Comprehensive device information (model, color, MAC addresses, etc.)
+* Tracks multiple AppleCare plan types
+* Primary plan identification with start and end dates
 
 ### Configuration
 
@@ -23,7 +25,8 @@ Add your AxM credentials to the `.env` file. Use [create_client_assertion.sh](ht
 # Apple Business Manager: https://api-business.apple.com/v1/
 APPLECARE_API_URL=https://api-school.apple.com/v1/
 APPLECARE_CLIENT_ASSERTION="Your Assertion String"
-APPLECARE_RATE_LIMIT=40  # Optional, default is 40 calls per minute
+APPLECARE_RATE_LIMIT=25  # Optional. 25 is the maximum and the default. A higher value is treated as 25. A lower value is kept.
+APPLECARE_SYNC_INTERVAL_DAYS=7  # Optional. Days between Apple API fetches for a client check-in. The default is 7. Each serial also waits an extra 0–11 hours.
 ```
 
 **Multiple Organizations:**
@@ -109,7 +112,7 @@ When configured, reseller names will be displayed instead of IDs in the AppleCar
 
 **Automatic Syncing (Recommended):**
 
-Clients automatically sync their AppleCare data every 10-14 days (randomized) during normal MunkiReport check-ins. 
+Clients upload this module about once an hour. The server calls Apple only when that serial has never had a completed fetch, or the last one is older than `APPLECARE_SYNC_INTERVAL_DAYS` (default is 7) plus 0–11 hours hashed from the serial. An org prefix can override the days, for example `6F730D13_APPLECARE_SYNC_INTERVAL_DAYS`. A saved coverage record and an HTTP 404 both count as a completed fetch. A 429 or other failure does not, so the next hourly upload tries again. Admin and CLI syncs are not gated by this interval. 
 
 **Manual Syncing Options:**
 
@@ -126,7 +129,7 @@ The AppleCare admin page (`Admin` → `Update AppleCare data`) includes:
 * **System Status Panel**: API URL and Client Assertion configuration status, rate limit setting, masked API URL display
 * **Exclude Existing Records Option**: Checkbox to exclude devices that already have AppleCare records from bulk sync. Useful for syncing only new devices or devices that haven't been synced yet. Device count updates dynamically based on checkbox state.
 * **Sync Progress Tracking**: Real-time progress bar, device counts, estimated time remaining, color-coded sync output (green: success, yellow: warnings, red: errors), completion summary
-* **Rate Limiting**: Moving window rate limiting (60-second rolling window), uses 80% of configured rate limit to allow room for background updates, automatic HTTP 429 handling with `Retry-After` support, configurable via `APPLECARE_RATE_LIMIT`. The system automatically spaces device syncs to prevent hitting rate limits while maximizing throughput.
+* **Rate Limiting**: After every Apple API call, including the OAuth token, the sync waits `60 / APPLECARE_RATE_LIMIT` seconds. 25 requests per minute is the maximum and the default (2.4 seconds). A higher `APPLECARE_RATE_LIMIT` is treated as 25. A lower value is kept. A cached token is not a call. A device in Apple Business Manager is 3 calls. A device that is not in the organization is 1 call. On HTTP 429 the sync retries that device after 15 seconds, then 30, then 60, or longer when Apple's `Retry-After` is higher.
 
 ### Client Detail Page Features
 
@@ -188,7 +191,7 @@ Based on [AppleCareCoverage.Attributes](https://developer.apple.com/documentatio
 **Sync not triggering automatically:**
 * Verify the client script is installed: Check for `/usr/local/munkireport/preflight.d/applecare`
 * Check client logs for "Running applecare" and "Requesting applecare" messages
-* Verify the plist exists: `/usr/local/munkireport/preflight.d/cache/applecare.plist`
+* Verify the plist exists: `/usr/local/munkireport/preflight.d/cache/applecare.plist` and that `checkin_timestamp` is recent. The server still skips the Apple call until `APPLECARE_SYNC_INTERVAL_DAYS` plus that serial's 0–11 hours have passed
 
 **HTTP 40x errors during sync:**
 * Verify API credentials are correct
@@ -196,9 +199,8 @@ Based on [AppleCareCoverage.Attributes](https://developer.apple.com/documentatio
 * Review server error logs for detailed error messages
 
 **Rate limit issues:**
-* The module uses 80% of the configured `APPLECARE_RATE_LIMIT` as the effective rate limit to allow room for background updates
-* Moving window rate limiting ensures smooth operation without hitting limits
-* Increase `APPLECARE_RATE_LIMIT` if you have a higher API quota
+* The sync sends requests at `APPLECARE_RATE_LIMIT`. 25 per minute is the maximum and the default. A higher setting is ignored. A lower setting is kept
+* A device not in Apple Business Manager counts as 1 request. The sync does not pause it as if it used 3
 * Run bulk syncs during off-hours
 * Use the CLI script for large syncs to avoid PHP timeout limits
 

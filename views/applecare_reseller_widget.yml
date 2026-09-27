@@ -5,6 +5,7 @@ i18n_title: applecare.widget.reseller_title
 i18n_tooltip: "Shows reseller names across all devices. Reseller names are translated from purchase_source_id using the reseller configuration file."
 icon: fa-shopping-cart
 listing_link: /show/listing/applecare/applecare
+search_prefix: "is_primary=1&reseller="
 search_key: label
 badge: count
 i18n_empty_result: no_data

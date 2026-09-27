@@ -5,6 +5,7 @@ i18n_title: applecare.widget.description_title
 i18n_tooltip: "Shows AppleCare coverage descriptions across all devices."
 icon: fa-sticky-note-o
 listing_link: /show/listing/applecare/applecare
+search_prefix: "is_primary=1&description="
 search_key: label
 badge: count
 i18n_empty_result: no_data
