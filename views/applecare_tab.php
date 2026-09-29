@@ -1,4 +1,14 @@
 <div id="applecare-tab"></div>
+<div id="lister" style="font-size: large; float: right;">
+    <a href="/show/listing/applecare/applecare" title="List">
+        <i class="btn btn-default tab-btn fa fa-list-alt"></i>
+    </a>
+</div>
+<div id="report_btn" style="font-size: large; float: right;">
+    <a href="/show/report/applecare/applecare" title="Report">
+        <i class="btn btn-default tab-btn fa fa-bar-chart-o"></i>
+    </a>
+</div>
 <h2><i class="fa fa-medkit"></i> <span data-i18n="applecare.title"></span></h2>
 
 <div style="margin-bottom: 15px;">
@@ -22,6 +32,11 @@
 
 <script>
 $(document).on('appReady', function(){
+    var $applecareCnt = $('#applecare-cnt');
+    var escapeHtml = function(value) {
+        return $('<div>').text(value == null ? '' : String(value)).html();
+    };
+
     // Helper function to parse date with multiple fallback formats
     var parseDate = function(dateValue) {
         if (!dateValue) return null;
@@ -74,10 +89,74 @@ $(document).on('appReady', function(){
         var labelClass = isYes ? yesClass : noClass;
         return '<span class="label ' + labelClass + '">' + displayText + '</span>';
     };
+
+    var setAppleCareBadge = function(data) {
+        var text = '';
+        var badgeClass = '';
+
+        if (data) {
+            // ABM presence should come from AxM device assignment data, not DEP enrollment.
+            // A device can exist in ABM while still showing enrolled_in_dep = No.
+            var assignmentStatus = data.device_assignment_status ? String(data.device_assignment_status).toUpperCase() : '';
+            var isInAbm = (assignmentStatus === 'ASSIGNED' || assignmentStatus === 'UNASSIGNED');
+            if (!isInAbm && !assignmentStatus) {
+                // Fallback for older/incomplete records where assignment status is missing.
+                isInAbm = (data.enrolled_in_dep == '1' || data.enrolled_in_dep == 'true' || data.enrolled_in_dep === true || String(data.enrolled_in_dep).toLowerCase() === 'true');
+            }
+            var statusUpper = data.status ? String(data.status).toUpperCase() : '';
+            var hasValidWarranty = (statusUpper === 'ACTIVE');
+
+            var parsedEnd = parseDate(data.endDateTime);
+            if (parsedEnd) {
+                var daysUntil = parsedEnd.startOf('day').diff(moment().startOf('day'), 'days');
+                if (daysUntil < 0) {
+                    hasValidWarranty = false;
+                }
+            }
+
+            if (!isInAbm) {
+                text = i18n.t('no');
+                badgeClass = 'alert-danger';
+            } else if (hasValidWarranty) {
+                text = 'OK';
+                badgeClass = 'alert-success';
+            } else {
+                text = i18n.t('applecare.expired') || 'Expired';
+                badgeClass = 'alert-warning';
+            }
+        }
+
+        $applecareCnt
+            .text(text)
+            .removeClass('alert-success alert-warning alert-danger')
+            .addClass(badgeClass);
+    };
     
-    var loadAppleCareData = function() {
-        $.getJSON(appUrl + '/module/applecare/get_data/' + serialNumber)
+    window.getAppleCareDetailData = window.getAppleCareDetailData || function(force) {
+        if (force) {
+            window.mrAppleCareDetailData = null;
+            window.mrAppleCareDetailPromise = null;
+        }
+        if (window.mrAppleCareDetailData !== undefined && window.mrAppleCareDetailData !== null && !force) {
+            return $.Deferred().resolve(window.mrAppleCareDetailData).promise();
+        }
+        if (!window.mrAppleCareDetailPromise) {
+            window.mrAppleCareDetailPromise = $.getJSON(appUrl + '/module/applecare/get_data/' + serialNumber)
+                .done(function(data) {
+                    window.mrAppleCareDetailData = data;
+                })
+                .fail(function() {
+                    window.mrAppleCareDetailPromise = null;
+                });
+        }
+        return window.mrAppleCareDetailPromise;
+    };
+
+    var loadAppleCareData = function(force) {
+        window.getAppleCareDetailData(force)
             .done(function(data){
+                setAppleCareBadge(data);
+
                 // Update last fetched timestamp in header (similar to jamf and mosyle)
                 if (data && data.last_fetched !== null && data.last_fetched !== undefined) {
                     var lastFetched = parseDate(data.last_fetched);
@@ -104,9 +183,9 @@ $(document).on('appReady', function(){
                     if (key === 'activation_lock_status') {
                         var statusUpper = String(data[key]).toUpperCase();
                         if (statusUpper === 'ENABLED' || statusUpper === 'ACTIVE' || statusUpper === 'TRUE') {
-                            td.html('<span class="label label-danger">' + data[key] + '</span>');
+                            td.html('<span class="label label-danger">' + escapeHtml(data[key]) + '</span>');
                         } else if (statusUpper === 'DISABLED' || statusUpper === 'INACTIVE' || statusUpper === 'FALSE') {
-                            td.html('<span class="label label-success">' + data[key] + '</span>');
+                            td.html('<span class="label label-success">' + escapeHtml(data[key]) + '</span>');
                         } else {
                             td.text(data[key]);
                         }
@@ -161,7 +240,7 @@ $(document).on('appReady', function(){
                         var resellerId = data['purchase_source_id_display'] || data['purchase_source_id'];
                         if (resellerName && resellerId && resellerName !== resellerId) {
                             // Show name with ID in faded brackets
-                            td.html(resellerName + ' <span class="text-muted">(' + resellerId + ')</span>');
+                            td.html(escapeHtml(resellerName) + ' <span class="text-muted">(' + escapeHtml(resellerId) + ')</span>');
                         } else if (resellerName) {
                             td.text(resellerName);
                         } else {
@@ -208,9 +287,9 @@ $(document).on('appReady', function(){
                     else if (key === 'mdm_enrollment_status') {
                         var statusUpper = String(data[key]).toUpperCase();
                         if (statusUpper === 'ENROLLED' || statusUpper === 'YES') {
-                            td.html('<span class="label label-success">' + data[key] + '</span>');
+                            td.html('<span class="label label-success">' + escapeHtml(data[key]) + '</span>');
                         } else if (statusUpper === 'NOT_ENROLLED' || statusUpper === 'NO') {
-                            td.html('<span class="label label-warning">' + data[key] + '</span>');
+                            td.html('<span class="label label-warning">' + escapeHtml(data[key]) + '</span>');
                         } else {
                             td.text(data[key]);
                         }
@@ -278,14 +357,18 @@ $(document).on('appReady', function(){
                             }
                             var statusHtml = '<span class="label ' + labelClass + '"';
                             if (tooltipText) {
-                                statusHtml += ' title="' + tooltipText + '" data-toggle="tooltip"';
+                                statusHtml += ' title="' + escapeHtml(tooltipText) + '" data-toggle="tooltip"';
                             }
-                            statusHtml += '>' + statusDisplay + '</span>';
+                            statusHtml += '>' + escapeHtml(statusDisplay) + '</span>';
                             td.html(statusHtml);
                             
                             // Initialize tooltip if present
                             if (tooltipText) {
-                                td.find('[data-toggle="tooltip"]').tooltip();
+                                td.find('[data-toggle="tooltip"]').tooltip({
+                                    placement: 'top',
+                                    container: 'body',
+                                    trigger: 'hover'
+                                });
                             }
                         } else if (statusUpper === 'INACTIVE') {
                             td.html('<span class="label label-danger">' + i18n.t('applecare.inactive') + '</span>');
@@ -341,6 +424,8 @@ $(document).on('appReady', function(){
             }
             })
             .fail(function(xhr, textStatus, errorThrown) {
+                setAppleCareBadge(null);
+
                 // Handle errors gracefully
                 var errorMsg = i18n.t('error_loading_data') || 'Error loading AppleCare data';
                 if (xhr.status === 404) {
@@ -353,10 +438,10 @@ $(document).on('appReady', function(){
                 
                 // Show error in both tables
                 $('#device-info-table tbody').html(
-                    '<tr><td colspan="2" class="text-danger">' + errorMsg + '</td></tr>'
+                    '<tr><td colspan="2" class="text-danger">' + escapeHtml(errorMsg) + '</td></tr>'
                 );
                 $('#applecare-tab-table tbody').html(
-                    '<tr><td colspan="2" class="text-danger">' + errorMsg + '</td></tr>'
+                    '<tr><td colspan="2" class="text-danger">' + escapeHtml(errorMsg) + '</td></tr>'
                 );
             });
     };
@@ -372,26 +457,26 @@ $(document).on('appReady', function(){
         // Disable button and show loading state
         $btn.prop('disabled', true);
         $btn.find('i').addClass('fa-spin');
-        $message.removeClass('alert-success alert-danger').addClass('alert alert-info').html('<i class="fa fa-spinner fa-spin"></i> Syncing AppleCare data for ' + serialNumber + '...').show();
+        $message.removeClass('alert-success alert-danger').addClass('alert alert-info').html('<i class="fa fa-spinner fa-spin"></i> Syncing AppleCare data for ' + escapeHtml(serialNumber) + '...').show();
         
         $.ajax({
             url: appUrl + '/module/applecare/sync_serial/' + serialNumber,
-            type: 'GET',
+            type: 'POST',
             dataType: 'json',
             success: function(response) {
                 $btn.prop('disabled', false);
                 $btn.find('i').removeClass('fa-spin');
 
                 if (response.success) {
-                    $message.removeClass('alert-info').addClass('alert-success').html('<i class="fa fa-check"></i> ' + (response.message || 'Sync completed successfully'));
+                    $message.removeClass('alert-info').addClass('alert-success').html('<i class="fa fa-check"></i> ' + escapeHtml(response.message || 'Sync completed successfully'));
 
                     // Reload the data
                     setTimeout(function() {
-                        loadAppleCareData();
+                        loadAppleCareData(true);
                         $message.fadeOut();
                     }, 1000);
                 } else {
-                    $message.removeClass('alert-info').addClass('alert-danger').html('<i class="fa fa-exclamation-triangle"></i> ' + (response.message || 'Sync failed'));
+                    $message.removeClass('alert-info').addClass('alert-danger').html('<i class="fa fa-exclamation-triangle"></i> ' + escapeHtml(response.message || 'Sync failed'));
                 }
             },
             error: function(xhr) {
@@ -407,7 +492,7 @@ $(document).on('appReady', function(){
                     errorMsg = 'Sync failed: HTTP ' + xhr.status;
                 }
 
-                $message.removeClass('alert-info').addClass('alert-danger').html('<i class="fa fa-exclamation-triangle"></i> ' + errorMsg);
+                $message.removeClass('alert-info').addClass('alert-danger').html('<i class="fa fa-exclamation-triangle"></i> ' + escapeHtml(errorMsg));
             }
         });
     });

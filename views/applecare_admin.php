@@ -7,7 +7,7 @@
             <p>Run the AppleCare sync script and inspect the output.</p>
             <div class="alert alert-warning">
                 <strong>Warning:</strong> The sync will stop if you close this page.
-                <br><strong>Connection info:</strong> If the connection times out, the sync will automatically resume from where it left off. For very long or automated syncs, the CLI script is available: <code>php sync_applecare.php</code>
+                <br><strong>Connection info:</strong> If the connection times out, the sync will automatically resume from where it left off. For very long or automated syncs, the CLI uses the same sync: <code>php sync_applecare.php</code>
                 <div style="padding-top: 4px;"><strong>Devices to process:</strong> <span id="device-count-display">Loading...</span></div>
             </div>
 
@@ -69,43 +69,74 @@
     var syncedCount = 0;
     var totalDevices = 0;
     var processedDevices = 0;
-    var devicesPerMinute = 8; // Default, will be updated from server config
-    
-    // Load admin status data (similar to jamf_admin.php)
-    $.getJSON(appUrl + '/module/applecare/get_admin_data', function(data) {
-        // Calculate devices per minute from rate limit (80% of limit, 3 requests per device)
-        if (data.rate_limit) {
-            var effectiveRateLimit = Math.floor(data.rate_limit * 0.8);
-            var requestsPerDevice = 3;
-            devicesPerMinute = effectiveRateLimit / requestsPerDevice;
+    var devicesPerMinute = 25 / 3; // Max 25 requests/minute, 3 requests per in-ABM device
+    var requestsPerMinute = 25;
+    var requestsPerDevice = 3;
+    var appleResponseSeconds = 0.7;
+
+    function estimatedSyncSeconds(deviceCount) {
+        if (!deviceCount || deviceCount < 1 || requestsPerMinute < 1) {
+            return 0;
         }
-        
-        // Display connection timeout info
-        // Note: PHP execution time limit is disabled for sync operations
-        // The actual timeout is from web server/proxy/SSE connection limits
-        // (Text is now static in HTML, no need to set via JavaScript)
-        
+        var secondsPerRequest = (60 / requestsPerMinute) + appleResponseSeconds;
+        return Math.ceil(deviceCount * requestsPerDevice * secondsPerRequest);
+    }
+
+    function escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+    
+    var adminStatusData = null;
+
+    function statusWord(key, fallback) {
+        try {
+            if (window.i18n && typeof i18n.t === 'function') {
+                var value = i18n.t(key);
+                if (value && value !== key) {
+                    return value;
+                }
+            }
+        } catch (e) {}
+        return fallback;
+    }
+
+    function renderSystemStatus(data) {
+        if (!data) {
+            return;
+        }
+        // Devices/min assumes 3 requests (device is in ABM). The sync itself paces on requests actually sent.
+        if (data.rate_limit) {
+            requestsPerMinute = data.rate_limit;
+            devicesPerMinute = data.rate_limit / requestsPerDevice;
+        }
+
+        var yesLabel = statusWord('yes', 'Yes');
+        var noLabel = statusWord('no', 'No');
         var statusRows = '<table class="table table-striped"><tbody>';
         
         // API URL configured
         statusRows += '<tr><th>API URL Configured</th><td>' + 
-            (data.api_url_configured ? '<span class="label label-success">' + i18n.t('yes') + '</span>' : '<span class="label label-danger">' + i18n.t('no') + '</span>') + 
+            (data.api_url_configured ? '<span class="label label-success">' + yesLabel + '</span>' : '<span class="label label-danger">' + noLabel + '</span>') + 
             '</td></tr>';
         
         // Client Assertion configured
         statusRows += '<tr><th>Client Assertion Configured</th><td>' + 
-            (data.client_assertion_configured ? '<span class="label label-success">' + i18n.t('yes') + '</span>' : '<span class="label label-danger">' + i18n.t('no') + '</span>') + 
+            (data.client_assertion_configured ? '<span class="label label-success">' + yesLabel + '</span>' : '<span class="label label-danger">' + noLabel + '</span>') + 
             '</td></tr>';
         
         // Rate Limit
-        statusRows += '<tr><th>Rate Limit</th><td>' + data.rate_limit + ' requests/minute (' + devicesPerMinute.toFixed(1) + ' devices/min)</td></tr>';
+        statusRows += '<tr><th>Rate Limit</th><td>' + escapeHtml(data.rate_limit) + ' requests/minute (' + devicesPerMinute.toFixed(1) + ' devices/min in ABM)</td></tr>';
         
         // Show API URL if configured (masked for security)
         if (data.default_api_url) {
             var maskedUrl = data.default_api_url.replace(/https?:\/\/([^\/]+)/, function(match, domain) {
                 return match.replace(domain, '***');
             });
-            statusRows += '<tr><th>API URL</th><td><code>' + maskedUrl + '</code></td></tr>';
+            statusRows += '<tr><th>API URL</th><td><code>' + escapeHtml(maskedUrl) + '</code></td></tr>';
         }
         
         // Reseller Config File Status
@@ -114,41 +145,50 @@
             var resellerLabel = 'label-default';
             
             if (data.reseller_config.valid) {
-                resellerStatus = '<span class="label label-success">Valid</span> (' + data.reseller_config.entry_count + ' entries)';
+                resellerStatus = '<span class="label label-success">Valid</span> (' + escapeHtml(data.reseller_config.entry_count) + ' entries)';
                 resellerLabel = 'label-success';
             } else if (data.reseller_config.exists && data.reseller_config.readable) {
                 resellerStatus = '<span class="label label-warning">Invalid</span>';
                 if (data.reseller_config.error) {
-                    resellerStatus += '<br><small style="color: #dc3545;">' + data.reseller_config.error + '</small>';
+                    resellerStatus += '<br><small style="color: #dc3545;">' + escapeHtml(data.reseller_config.error) + '</small>';
                 }
             } else if (data.reseller_config.exists) {
                 resellerStatus = '<span class="label label-danger">Not Readable</span>';
                 if (data.reseller_config.error) {
-                    resellerStatus += '<br><small style="color: #dc3545;">' + data.reseller_config.error + '</small>';
+                    resellerStatus += '<br><small style="color: #dc3545;">' + escapeHtml(data.reseller_config.error) + '</small>';
                 }
             } else {
                 resellerStatus = '<span class="label label-default">Not Found</span>';
                 if (data.reseller_config.error) {
-                    resellerStatus += '<br><small style="color: #6c757d;">' + data.reseller_config.error + '</small>';
+                    resellerStatus += '<br><small style="color: #6c757d;">' + escapeHtml(data.reseller_config.error) + '</small>';
                 }
             }
             
             statusRows += '<tr><th>Reseller Config</th><td>' + resellerStatus;
             if (data.reseller_config.path) {
-                statusRows += '<br><small style="color: #6c757d;"><code>' + data.reseller_config.path + '</code></small>';
+                statusRows += '<br><small style="color: #6c757d;"><code>' + escapeHtml(data.reseller_config.path) + '</code></small>';
             }
             statusRows += '</td></tr>';
         }
         
         statusRows += '</tbody></table>';
         $('#AppleCare-System-Status').html(statusRows);
-        
-        // Now that we have the rate limit, update the device count display
+    }
+
+    // Load admin status data (similar to jamf_admin.php).
+    // This request often returns before translations load, so render again on appReady.
+    $.getJSON(appUrl + '/module/applecare/get_admin_data', function(data) {
+        adminStatusData = data;
+        renderSystemStatus(data);
         updateDeviceCount();
     }).fail(function() {
         $('#AppleCare-System-Status').html('<div class="alert alert-warning">Unable to load system status</div>');
         // Still load device count even if admin data fails (will use default rate)
         updateDeviceCount();
+    });
+
+    $(document).on('appReady', function() {
+        renderSystemStatus(adminStatusData);
     });
 
     // Load device count and update display
@@ -170,7 +210,7 @@
                 
                 // Calculate and display estimated time using configured rate limit
                 if (count > 0) {
-                    var estimatedSeconds = Math.ceil((count / devicesPerMinute) * 60);
+                    var estimatedSeconds = estimatedSyncSeconds(count);
                     updateEstimatedTime(estimatedSeconds, count);
                 } else {
                     updateEstimatedTime(0, 0);
@@ -202,7 +242,7 @@
             // Update estimated time using configured rate limit
             var remainingDevices = totalDevices - processedDevices;
             if (remainingDevices > 0) {
-                var estimatedSeconds = Math.ceil((remainingDevices / devicesPerMinute) * 60);
+                var estimatedSeconds = estimatedSyncSeconds(remainingDevices);
                 updateEstimatedTime(estimatedSeconds, remainingDevices);
             } else {
                 updateEstimatedTime(0, 0);
@@ -229,9 +269,8 @@
     function appendOutput(text){
         if (text) {
             outputBuffer += text + '\n';
-            
-            // Color code the output
-            var coloredBuffer = outputBuffer;
+
+            var coloredBuffer = escapeHtml(outputBuffer);
             
             // Color patterns
             // Success/OK messages - green
@@ -333,11 +372,27 @@
             .show();
     }
 
+    var tooltipOptions = {
+        placement: 'top',
+        container: 'body',
+        trigger: 'hover'
+    };
+
+    function hideTips($el) {
+        $el.each(function() {
+            var $tip = $(this);
+            if ($tip.data('bs.tooltip')) {
+                $tip.tooltip('hide');
+            }
+        });
+    }
+
     function stopSync(){
         if (eventSource) {
             eventSource.close();
             eventSource = null;
         }
+        hideTips($('#stop-sync, #reset-progress'));
         $btn.prop('disabled', false);
         $excludeCheckbox.prop('disabled', false);
         $('#stop-sync').hide();
@@ -347,6 +402,86 @@
         if (typeof resetAutoResumeState === 'function') {
             resetAutoResumeState();
         }
+    }
+
+    var autoResumeAttempts = 0;
+    var maxAutoResumeAttempts = 10;
+    var autoResumeDelay = 5000;
+    var autoResumeStartTime = null;
+    var lastProcessedCount = 0;
+    var lastFailureTime = null;
+    var maxAutoResumeDuration = 3600000;
+    var minTimeBetweenFailures = 30000;
+
+    function resetAutoResumeState() {
+        autoResumeAttempts = 0;
+        autoResumeStartTime = null;
+        lastProcessedCount = 0;
+        lastFailureTime = null;
+    }
+
+    function attemptAutoResume() {
+        var now = Date.now();
+
+        if (autoResumeStartTime === null) {
+            autoResumeStartTime = now;
+        }
+
+        if (now - autoResumeStartTime > maxAutoResumeDuration) {
+            appendOutput('\nAuto-resume stopped: Maximum duration (1 hour) exceeded. Please run sync manually.\n');
+            $status.text('Auto-resume timeout');
+            showCompletionMessage(false, {message: 'Auto-resume stopped after 1 hour. Please run sync manually.'});
+            stopSync();
+            resetAutoResumeState();
+            return;
+        }
+
+        if (lastFailureTime !== null) {
+            var timeSinceLastFailure = now - lastFailureTime;
+            var currentProcessed = processedDevices || 0;
+
+            if (timeSinceLastFailure < minTimeBetweenFailures && currentProcessed <= lastProcessedCount) {
+                appendOutput('\nAuto-resume stopped: No progress detected between failures. Please check connection and run sync manually.\n');
+                $status.text('Auto-resume stopped');
+                showCompletionMessage(false, {message: 'Auto-resume stopped: No progress detected. Please run sync manually.'});
+                stopSync();
+                resetAutoResumeState();
+                return;
+            }
+
+            if (currentProcessed > lastProcessedCount) {
+                lastProcessedCount = currentProcessed;
+            }
+        } else {
+            lastProcessedCount = processedDevices || 0;
+        }
+
+        if (autoResumeAttempts >= maxAutoResumeAttempts) {
+            appendOutput('\nMaximum auto-resume attempts (' + maxAutoResumeAttempts + ') reached. Please run sync manually.\n');
+            $status.text('Auto-resume failed');
+            showCompletionMessage(false, {message: 'Connection failed after ' + maxAutoResumeAttempts + ' auto-resume attempts. Please run sync manually.'});
+            stopSync();
+            resetAutoResumeState();
+            return;
+        }
+
+        autoResumeAttempts++;
+        lastFailureTime = now;
+        appendOutput('\nAuto-resuming sync in ' + (autoResumeDelay / 1000) + ' seconds... (attempt ' + autoResumeAttempts + '/' + maxAutoResumeAttempts + ')\n');
+        $status.text('Auto-resuming...');
+
+        setTimeout(function() {
+            if (!$btn.prop('disabled') || $status.text() === 'Finished' || $status.text() === 'Finished with errors') {
+                resetAutoResumeState();
+                return;
+            }
+            appendOutput('Resuming now...\n');
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            startSync();
+        }, autoResumeDelay);
     }
 
     function startSync() {
@@ -362,6 +497,7 @@
             resetAutoResumeState();
         }
         
+        hideTips($('#reset-progress, #stop-sync'));
         $btn.prop('disabled', true);
         $excludeCheckbox.prop('disabled', true);
         $('#stop-sync').show();
@@ -382,13 +518,29 @@
         // Show progress bar immediately (will be updated with actual counts)
         $('#sync-progress').removeClass('hide');
 
-        // Use Server-Sent Events for real-time streaming
-        var url = appUrl + '/module/applecare/sync?stream=1';
-        if (excludeExisting) {
-            url += '&exclude_existing=1';
-        }
-        eventSource = new EventSource(url);
+        $.ajax({
+            url: appUrl + '/module/applecare/sync_nonce',
+            method: 'POST',
+            dataType: 'json'
+        }).done(function(tokenData) {
+            if (!tokenData || !tokenData.nonce) {
+                appendOutput('ERROR: Could not start sync');
+                stopSync();
+                return;
+            }
+            var url = appUrl + '/module/applecare/sync?stream=1&nonce=' + encodeURIComponent(tokenData.nonce);
+            if (excludeExisting) {
+                url += '&exclude_existing=1';
+            }
+            eventSource = new EventSource(url);
+            attachSyncHandlers();
+        }).fail(function() {
+            appendOutput('ERROR: Could not start sync');
+            stopSync();
+        });
+    }
 
+    function attachSyncHandlers() {
         eventSource.onopen = function() {
             appendOutput('Connected to sync process...\n');
         };
@@ -406,7 +558,7 @@
                 // Update estimated time for remaining devices
                 var remaining = resumeData.remaining || 0;
                 if (remaining > 0) {
-                    var estimatedSeconds = Math.ceil((remaining / devicesPerMinute) * 60);
+                    var estimatedSeconds = estimatedSyncSeconds(remaining);
                     updateEstimatedTime(estimatedSeconds, remaining);
                 }
             }
@@ -431,7 +583,7 @@
                     
                     // Update estimated time for remaining devices
                     if (remaining > 0) {
-                        var estimatedSeconds = Math.ceil((remaining / devicesPerMinute) * 60);
+                        var estimatedSeconds = estimatedSyncSeconds(remaining);
                         updateEstimatedTime(estimatedSeconds, remaining);
                     }
                 }
@@ -525,8 +677,15 @@
             var data = JSON.parse(e.data);
             appendOutput('Exit code: ' + data.exit_code + '\n');
             appendOutput('================================================\n');
-            
-            $status.text(data.success ? 'Finished' : 'Finished with errors');
+
+            if ($status.text() === 'Stopping…' || $status.text() === 'Stopped') {
+                $status.text('Stopped');
+            } else {
+                $status.text(data.success ? 'Finished' : 'Finished with errors');
+            }
+            if (eventSource) {
+                eventSource.close();
+            }
             showCompletionMessage(data.success, data);
             
             // Reset auto-resume state on successful completion
@@ -548,113 +707,30 @@
             stopSync();
         });
 
-        var autoResumeAttempts = 0;
-        var maxAutoResumeAttempts = 10; // Max 10 auto-resume attempts
-        var autoResumeDelay = 5000; // 5 seconds delay before auto-resume
-        var autoResumeStartTime = null; // Track when auto-resume sequence started
-        var lastProcessedCount = 0; // Track last processed device count
-        var lastFailureTime = null; // Track time of last failure
-        var maxAutoResumeDuration = 3600000; // Max 1 hour of auto-resuming (in milliseconds)
-        var minTimeBetweenFailures = 30000; // Min 30 seconds between failures to count as progress
-        
-        function resetAutoResumeState() {
-            autoResumeAttempts = 0;
-            autoResumeStartTime = null;
-            lastProcessedCount = 0;
-            lastFailureTime = null;
-        }
-        
-        function attemptAutoResume() {
-            var now = Date.now();
-            
-            // Initialize auto-resume start time on first attempt
-            if (autoResumeStartTime === null) {
-                autoResumeStartTime = now;
-            }
-            
-            // Check if we've been auto-resuming for too long
-            if (now - autoResumeStartTime > maxAutoResumeDuration) {
-                appendOutput('\nAuto-resume stopped: Maximum duration (1 hour) exceeded. Please run sync manually.\n');
-                $status.text('Auto-resume timeout');
-                showCompletionMessage(false, {message: 'Auto-resume stopped after 1 hour. Please run sync manually.'});
-                stopSync();
-                resetAutoResumeState();
-                return;
-            }
-            
-            // Check if we're making progress (processed count increased)
-            if (lastFailureTime !== null) {
-                var timeSinceLastFailure = now - lastFailureTime;
-                var currentProcessed = processedDevices || 0;
-                
-                // If we're failing too quickly and not making progress, stop
-                if (timeSinceLastFailure < minTimeBetweenFailures && currentProcessed <= lastProcessedCount) {
-                    appendOutput('\nAuto-resume stopped: No progress detected between failures. Please check connection and run sync manually.\n');
-                    $status.text('Auto-resume stopped');
-                    showCompletionMessage(false, {message: 'Auto-resume stopped: No progress detected. Please run sync manually.'});
-                    stopSync();
-                    resetAutoResumeState();
-                    return;
-                }
-                
-                // Update last processed count if we made progress
-                if (currentProcessed > lastProcessedCount) {
-                    lastProcessedCount = currentProcessed;
-                }
-            } else {
-                lastProcessedCount = processedDevices || 0;
-            }
-            
-            // Check max attempts
-            if (autoResumeAttempts >= maxAutoResumeAttempts) {
-                appendOutput('\nMaximum auto-resume attempts (' + maxAutoResumeAttempts + ') reached. Please run sync manually.\n');
-                $status.text('Auto-resume failed');
-                showCompletionMessage(false, {message: 'Connection failed after ' + maxAutoResumeAttempts + ' auto-resume attempts. Please run sync manually.'});
-                stopSync();
-                resetAutoResumeState();
-                return;
-            }
-            
-            autoResumeAttempts++;
-            lastFailureTime = now;
-            appendOutput('\nAuto-resuming sync in ' + (autoResumeDelay / 1000) + ' seconds... (attempt ' + autoResumeAttempts + '/' + maxAutoResumeAttempts + ')\n');
-            $status.text('Auto-resuming...');
-            
-            setTimeout(function() {
-                // Only auto-resume if connection is still closed (not manually stopped)
-                if (!$btn.prop('disabled') || $status.text() === 'Finished' || $status.text() === 'Finished with errors') {
-                    // User manually stopped or sync completed, don't auto-resume
-                    resetAutoResumeState();
-                    return;
-                }
-                appendOutput('Resuming now...\n');
-                // Close old connection if still exists
-                if (eventSource) {
-                    eventSource.close();
-                    eventSource = null;
-                }
-                startSync();
-            }, autoResumeDelay);
-        }
-
         eventSource.onerror = function(e) {
-            if (eventSource.readyState === EventSource.CLOSED) {
-                // Connection closed - sync completed or error occurred
-                if ($status.text() === 'Running…') {
-                    // Unexpected closure - attempt auto-resume
-                    appendOutput('\nConnection closed unexpectedly.\n');
-                    appendOutput('Progress has been saved. Attempting to auto-resume...\n');
-                    attemptAutoResume();
-                } else {
-                    // Normal completion or user stopped
-                    stopSync();
-                }
-            } else {
-                // Connection error - attempt auto-resume
-                appendOutput('\nConnection error occurred.\n');
+            if (e && typeof e.data === 'string') {
+                return;
+            }
+            var source = eventSource;
+            if (source) {
+                source.close();
+                eventSource = null;
+            }
+            if ($status.text() === 'Running…') {
+                appendOutput('\nConnection closed unexpectedly.\n');
                 appendOutput('Progress has been saved. Attempting to auto-resume...\n');
                 attemptAutoResume();
+                return;
             }
+            if ($status.text() === 'Auto-resuming...') {
+                return;
+            }
+            if ($status.text() === 'Stopping…') {
+                $status.text('Stopped');
+                stopSync();
+                return;
+            }
+            stopSync();
         };
     }
 
@@ -668,6 +744,7 @@
         var originalText = $stopBtn.html();
         
         // Disable button and show loading state
+        hideTips($stopBtn);
         $stopBtn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Stopping...');
         
         $.ajax({
@@ -679,18 +756,8 @@
                     // Show success message
                     $stopBtn.html('<i class="fa fa-check"></i> Stop Signal Sent').removeClass('btn-danger').addClass('btn-success');
                     appendOutput('Stop signal sent. Sync will stop after processing current device...\n');
-                    
-                    // Close the EventSource connection
-                    if (eventSource) {
-                        eventSource.close();
-                        eventSource = null;
-                    }
-                    
-                    // Update UI
-                    setTimeout(function() {
-                        stopSync();
-                        $stopBtn.html(originalText).removeClass('btn-success').addClass('btn-danger').prop('disabled', false);
-                    }, 2000);
+                    $status.text('Stopping…');
+                    $stopBtn.html(originalText).removeClass('btn-success').addClass('btn-danger').prop('disabled', true);
                 } else {
                     alert('Failed to stop sync: ' + (data.message || 'Unknown error'));
                     $stopBtn.html(originalText).prop('disabled', false);
@@ -715,6 +782,7 @@
         var originalText = $resetBtn.html();
         
         // Disable button and show loading state
+        hideTips($resetBtn);
         $resetBtn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Resetting...');
         
         $.ajax({
@@ -779,7 +847,7 @@
             if ($resetBtn.data('bs.tooltip')) {
                 $resetBtn.tooltip('destroy');
             }
-            $resetBtn.tooltip();
+            $resetBtn.tooltip(tooltipOptions);
         }).fail(function() {
             // On error, use default tooltip
             var $resetBtn = $('#reset-progress');
@@ -788,15 +856,27 @@
             if ($resetBtn.data('bs.tooltip')) {
                 $resetBtn.tooltip('destroy');
             }
-            $resetBtn.tooltip();
+            $resetBtn.tooltip(tooltipOptions);
         });
     }
     
-    // Initialize tooltips first
-    $('[data-toggle="tooltip"]').tooltip();
-    
-    // Load progress count on page load and update tooltip
-    updateResetProgressTooltip();
+    function initAdminTips() {
+        $('#stop-sync, #reset-progress').each(function() {
+            var $el = $(this);
+            if ($el.data('bs.tooltip')) {
+                $el.tooltip('destroy');
+            }
+            $el.tooltip(tooltipOptions);
+        });
+    }
+
+    // Bootstrap loads in the page footer, after this script. The global
+    // tooltip pass also runs before appReady and keeps the default
+    // hover+focus trigger, which leaves the tip open after a click.
+    $(document).on('appReady', function() {
+        initAdminTips();
+        updateResetProgressTooltip();
+    });
 })();
 </script>
 

@@ -9,8 +9,8 @@ buttons:
   - label: 0
     i18n_label: no
     class: btn-warning
-    search_component: isRenewable=0
+    search_component: is_primary=1&isRenewable=0
   - label: 1
     i18n_label: yes
     class: btn-info
-    search_component: isRenewable=1
+    search_component: is_primary=1&isRenewable=1

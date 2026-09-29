@@ -132,12 +132,16 @@ var format_applecare_coverage_status = function(colNumber, row) {
     } else if (statusLower === 'expiring_soon') {
         labelClass = 'label-warning';
         displayText = i18n.t('applecare.expiring_soon');
-        // Try to get days until expiry from endDateTime column
         var oTable = $('.table').DataTable();
         var rowData = oTable.row(row).data();
-        // endDateTime is at index 8 (based on updated yml: coverage_status=3, device_assignment=4, enrolled=5, desc=6, reseller=7, start=8, end=9)
-        if (rowData && Array.isArray(rowData) && rowData[9]) {
-            var endDate = moment(rowData[9]);
+        var endCol = null;
+        try {
+            endCol = oTable.column('applecare.endDateTime:name').index();
+        } catch (e) {
+            endCol = null;
+        }
+        if (rowData && Array.isArray(rowData) && endCol !== null && endCol !== undefined && rowData[endCol]) {
+            var endDate = moment(rowData[endCol]);
             if (endDate.isValid()) {
                 var daysUntil = endDate.diff(moment().startOf('day'), 'days');
                 if (daysUntil >= 0) {
@@ -150,6 +154,10 @@ var format_applecare_coverage_status = function(colNumber, row) {
         displayText = i18n.t('applecare.expired');
     }
     
+    var $oldTip = col.find('[data-toggle="tooltip"]');
+    if ($oldTip.data('bs.tooltip')) {
+        $oldTip.tooltip('hide').tooltip('destroy');
+    }
     var statusHtml = '<span class="label ' + labelClass + '"';
     if (tooltipText) {
         statusHtml += ' title="' + tooltipText.replace(/"/g, '&quot;') + '" data-toggle="tooltip"';
@@ -157,7 +165,10 @@ var format_applecare_coverage_status = function(colNumber, row) {
     statusHtml += '>' + displayText.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>';
     col.html(statusHtml);
     if (tooltipText) {
-        col.find('[data-toggle="tooltip"]').tooltip();
+        col.find('[data-toggle="tooltip"]').tooltip({
+            placement: 'top',
+            container: 'body'
+        });
     }
 }
 
@@ -286,22 +297,17 @@ var format_applecare_device_assignment_status = function(colNumber, row) {
     
     var statusUpper = String(status).toUpperCase();
     
-    // DEVICE_ASSIGNMENT_UNKNOWN with released_from_org_date should be displayed as Released
-    // Since we can't easily check released_from_org_date in the formatter, we'll display
-    // DEVICE_ASSIGNMENT_UNKNOWN as Released (matching widget behavior)
-    if (statusUpper === 'DEVICE_ASSIGNMENT_UNKNOWN') {
-        col.html('<span class="label label-danger">Released</span>');
-        return;
-    }
-    
     var statusDisplay = status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
-    
+    var safeDisplay = statusDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
     if (statusUpper === 'ASSIGNED') {
-        col.html('<span class="label label-success">' + statusDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>');
+        col.html('<span class="label label-success">' + safeDisplay + '</span>');
     } else if (statusUpper === 'UNASSIGNED') {
-        col.html('<span class="label label-warning">' + statusDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>');
+        col.html('<span class="label label-warning">' + safeDisplay + '</span>');
     } else if (statusUpper === 'RELEASED') {
-        col.html('<span class="label label-danger">' + statusDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>');
+        col.html('<span class="label label-danger">' + safeDisplay + '</span>');
+    } else if (statusUpper === 'DEVICE_ASSIGNMENT_UNKNOWN') {
+        col.html('<span class="label label-default">Unknown</span>');
     } else {
         col.text(statusDisplay);
     }
@@ -318,10 +324,12 @@ var device_assignment_status_filter = function(colNumber, d) {
         d.columns[colNumber].search.regex = false;
         d.search.value = '';
     }
-    if(d.search.value.match(/^(released|DEVICE_ASSIGNMENT_UNKNOWN)$/i)) {
-        // Released devices may have NULL or DEVICE_ASSIGNMENT_UNKNOWN in the database
-        // We need to search for both, but DataTables can't do OR searches easily
-        // So we'll search for DEVICE_ASSIGNMENT_UNKNOWN (which is what the API returns)
+    if(d.search.value.match(/^released$/i)) {
+        d.columns[colNumber].search.value = 'RELEASED';
+        d.columns[colNumber].search.regex = false;
+        d.search.value = '';
+    }
+    if(d.search.value.match(/^(unknown|DEVICE_ASSIGNMENT_UNKNOWN)$/i)) {
         d.columns[colNumber].search.value = 'DEVICE_ASSIGNMENT_UNKNOWN';
         d.columns[colNumber].search.regex = false;
         d.search.value = '';
@@ -333,13 +341,24 @@ var resellerConfig = {};
 var resellerConfigLoaded = false;
 
 // Load reseller config on page load (load early, before appReady if possible)
+function reloadApplecareResellerHash() {
+    if (window.location.hash.indexOf('reseller=') === -1) {
+        return;
+    }
+    if ($('.table').length && $.fn.dataTable.isDataTable('.table')) {
+        $('.table').DataTable().ajax.reload();
+    }
+}
+
 (function() {
     $.getJSON(appUrl + '/module/applecare/get_reseller_config', function(data) {
         resellerConfig = data || {};
         resellerConfigLoaded = true;
+        reloadApplecareResellerHash();
     }).fail(function() {
         console.warn('AppleCare: Failed to load reseller config');
-        resellerConfigLoaded = true; // Mark as loaded even on failure to prevent infinite waiting
+        resellerConfigLoaded = true;
+        reloadApplecareResellerHash();
     });
 })();
 
@@ -349,9 +368,11 @@ $(document).on('appReady', function() {
         $.getJSON(appUrl + '/module/applecare/get_reseller_config', function(data) {
             resellerConfig = data || {};
             resellerConfigLoaded = true;
+            reloadApplecareResellerHash();
         }).fail(function() {
             console.warn('AppleCare: Failed to load reseller config');
             resellerConfigLoaded = true;
+            reloadApplecareResellerHash();
         });
     }
 });
@@ -476,25 +497,28 @@ var hashFromHashChange = false; // Track if hash came from hashchange event (wid
 function parseApplecareHash() {
     applecareHashParams = {};
     var hash = window.location.hash.substring(1);
-    if (hash) {
-        // Decode the entire hash first (button widget encodes the whole search_component)
+    if (!hash) {
+        return;
+    }
+    try {
         hash = decodeURIComponent(hash);
-        
-        // Check for @is_primary format (e.g., "Mosyle@is_primary")
-        if (hash.indexOf('@is_primary') !== -1) {
-            var parts = hash.split('@is_primary');
-            var searchValue = parts[0];
-            applecareHashParams.is_primary = '1';
-            applecareHashParams.mdm_server = searchValue;
-        } else {
-            // Standard &key=value format
-            hash.split('&').forEach(function(param) {
-                var parts = param.split('=');
-                if (parts.length === 2) {
-                    applecareHashParams[parts[0]] = decodeURIComponent(parts[1]);
-                }
-            });
-        }
+    } catch (e) {
+        return;
+    }
+    var keys = ['device_assignment_status', 'coverage_status', 'enrolled_in_dep', 'paymentType', 'isRenewable', 'isCanceled', 'description', 'mdm_server', 'is_primary', 'reseller', 'status'];
+    var pattern = new RegExp('(?:^|&)(' + keys.join('|') + ')=', 'g');
+    var marks = [];
+    var match;
+    while ((match = pattern.exec(hash)) !== null) {
+        marks.push({
+            key: match[1],
+            valueStart: pattern.lastIndex,
+            boundary: match.index
+        });
+    }
+    for (var i = 0; i < marks.length; i++) {
+        var valueEnd = (i + 1 < marks.length) ? marks[i + 1].boundary : hash.length;
+        applecareHashParams[marks[i].key] = hash.substring(marks[i].valueStart, valueEnd);
     }
 }
 
@@ -549,32 +573,7 @@ function wrapApplecareFilter() {
         mr.listingFilter.filter = function(d, columnFilters) {
             // Re-parse hash in case it changed
             parseApplecareHash();
-            
-            // Handle scrollbox widget hash formats
-            // Format 1: #value@is_primary (e.g., #Mosyle@is_primary) - already parsed in parseApplecareHash
-            // Format 2: #value (simple value - treat as MDM server search with is_primary=1)
-            var hash = window.location.hash.substring(1);
-            var isWidgetHash = false;
-            if (hash && Object.keys(applecareHashParams).length === 0) {
-                try {
-                    var decodedHash = decodeURIComponent(hash);
-                    // If parseApplecareHash didn't set params, check if it's a simple value
-                    // Simple values (no =, no &, no @, no spaces, reasonable length) are likely widget clicks
-                    if (decodedHash.length > 0 && decodedHash.length <= 100 && 
-                        decodedHash.indexOf(' ') === -1 && 
-                        decodedHash.indexOf('=') === -1 && 
-                        decodedHash.indexOf('&') === -1 &&
-                        decodedHash.indexOf('@') === -1) {
-                        // This looks like a widget hash - treat as MDM server search with is_primary=1
-                        applecareHashParams.is_primary = '1';
-                        applecareHashParams.mdm_server = decodedHash;
-                        isWidgetHash = true;
-                    }
-                } catch(e) {
-                    // If decoding fails, ignore it
-                }
-            }
-            
+
             // Check if global search matches a reseller name and convert to ID search
             // Only do this if resellerConfig is loaded and has data
             if (d.search.value && d.search.value.trim() && resellerConfigLoaded && resellerConfig && Object.keys(resellerConfig).length > 0) {
@@ -594,17 +593,6 @@ function wrapApplecareFilter() {
                 if (!matchedResellerId) {
                     for (var resellerId in resellerConfig) {
                         if (resellerId.toLowerCase() === searchValue.toLowerCase()) {
-                            matchedResellerId = resellerId;
-                            break;
-                        }
-                    }
-                }
-                
-                // Finally check for partial name match (only if no exact match found)
-                if (!matchedResellerId) {
-                    for (var resellerId in resellerConfig) {
-                        var resellerName = resellerConfig[resellerId];
-                        if (resellerName && resellerName.toLowerCase().indexOf(searchValue.toLowerCase()) !== -1) {
                             matchedResellerId = resellerId;
                             break;
                         }
@@ -678,50 +666,90 @@ function wrapApplecareFilter() {
         }
         
         if (applecareHashParams.status) {
-            var found = false;
-            $.each(d.columns, function(index, item){
-                if(item.name === 'applecare.status'){
-                    d.columns[index].search.value = applecareHashParams.status; // Exact match, no regex
-                    d.columns[index].search.regex = false;
-                    found = true;
-                }
+            d.where.push({
+                table: 'applecare',
+                column: 'status',
+                operator: '=',
+                value: applecareHashParams.status
             });
-            if (found) {
-                // Clear global search when column search is set
-                d.search.value = '';
-            }
+            d.search.value = '';
         }
-        
+
+        if (applecareHashParams.paymentType) {
+            d.where.push({
+                table: 'applecare',
+                column: 'paymentType',
+                operator: '=',
+                value: applecareHashParams.paymentType
+            });
+            d.search.value = '';
+        }
+
+        if (applecareHashParams.description) {
+            d.where.push({
+                table: 'applecare',
+                column: 'description',
+                operator: '=',
+                value: applecareHashParams.description
+            });
+            d.search.value = '';
+        }
+
         if (applecareHashParams.isRenewable !== undefined && applecareHashParams.isRenewable !== null) {
-            var found = false;
-            $.each(d.columns, function(index, item){
-                if(item.name === 'applecare.isRenewable'){
-                    // Use = 1 or = 0 format like other modules (boolean fields)
-                    d.columns[index].search.value = '= ' + applecareHashParams.isRenewable;
-                    d.columns[index].search.regex = false;
-                    found = true;
-                }
+            d.where.push({
+                table: 'applecare',
+                column: 'isRenewable',
+                operator: '=',
+                value: applecareHashParams.isRenewable
             });
-            if (found) {
-                // Clear global search when column search is set
-                d.search.value = '';
-            }
+            d.search.value = '';
         }
-        
+
         if (applecareHashParams.isCanceled !== undefined && applecareHashParams.isCanceled !== null) {
-            var found = false;
-            $.each(d.columns, function(index, item){
-                if(item.name === 'applecare.isCanceled'){
-                    // Use = 1 or = 0 format like other modules (boolean fields)
-                    d.columns[index].search.value = '= ' + applecareHashParams.isCanceled;
-                    d.columns[index].search.regex = false;
-                    found = true;
-                }
+            d.where.push({
+                table: 'applecare',
+                column: 'isCanceled',
+                operator: '=',
+                value: applecareHashParams.isCanceled
             });
-            if (found) {
-                // Clear global search when column search is set
-                d.search.value = '';
+            d.search.value = '';
+        }
+
+        if (applecareHashParams.reseller) {
+            var resellerValue = applecareHashParams.reseller;
+            var matchedResellerId = null;
+            var resellerId;
+            var resellerName;
+            if (resellerConfigLoaded) {
+                for (resellerId in resellerConfig) {
+                    if (!Object.prototype.hasOwnProperty.call(resellerConfig, resellerId)) {
+                        continue;
+                    }
+                    resellerName = resellerConfig[resellerId];
+                    if (typeof resellerName === 'string' && resellerName.toLowerCase() === String(resellerValue).toLowerCase()) {
+                        matchedResellerId = resellerId;
+                        break;
+                    }
+                }
+                if (!matchedResellerId) {
+                    for (resellerId in resellerConfig) {
+                        if (!Object.prototype.hasOwnProperty.call(resellerConfig, resellerId)) {
+                            continue;
+                        }
+                        if (String(resellerId).toLowerCase() === String(resellerValue).toLowerCase()) {
+                            matchedResellerId = resellerId;
+                            break;
+                        }
+                    }
+                }
             }
+            d.where.push({
+                table: 'applecare',
+                column: 'purchase_source_id',
+                operator: '=',
+                value: resellerConfigLoaded ? (matchedResellerId || resellerValue) : '\u0000'
+            });
+            d.search.value = '';
         }
         
         if (applecareHashParams.enrolled_in_dep !== undefined && applecareHashParams.enrolled_in_dep !== null) {
@@ -745,21 +773,14 @@ function wrapApplecareFilter() {
             d.search.value = '';
         }
         
-        // Apply mdm_server filter using column search
-        // This can come from hash params (mdm_server=value) or from @is_primary format
         if (applecareHashParams.mdm_server) {
-            var found = false;
-            $.each(d.columns, function(index, item){
-                if(item.name === 'applecare.mdm_server'){
-                    d.columns[index].search.value = applecareHashParams.mdm_server;
-                    d.columns[index].search.regex = false;
-                    found = true;
-                }
+            d.where.push({
+                table: 'applecare',
+                column: 'mdm_server',
+                operator: '=',
+                value: applecareHashParams.mdm_server
             });
-            if (found) {
-                // Clear global search when column search is set
-                d.search.value = '';
-            }
+            d.search.value = '';
         }
         };
         // Mark as wrapped to prevent multiple wraps
