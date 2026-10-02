@@ -159,7 +159,6 @@ try {
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_error = curl_error($ch);
-    curl_close($ch);
 
     if ($curl_error) {
         throw new Exception("cURL error: {$curl_error}");
@@ -300,7 +299,6 @@ foreach ($devices as $device) {
         $device_response = curl_exec($ch);
         $device_http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $device_curl_error = curl_error($ch);
-        curl_close($ch);
 
         // Track request timestamp (count all HTTP responses, they consume rate limit quota)
         // Only skip if there was a curl error (no HTTP response received)
@@ -334,7 +332,6 @@ foreach ($devices as $device) {
                     
                     $mdm_response = curl_exec($mdm_ch);
                     $mdm_http_code = curl_getinfo($mdm_ch, CURLINFO_HTTP_CODE);
-                    curl_close($mdm_ch);
                     
                     // Track request timestamp for rate limiting
                     if ($mdm_http_code > 0) {
@@ -439,7 +436,6 @@ foreach ($devices as $device) {
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curl_error = curl_error($ch);
         $curl_errno = curl_errno($ch);
-        curl_close($ch);
 
         // Track request timestamp (count all HTTP responses, they consume rate limit quota)
         // Only skip if there was a curl error (no HTTP response received)
@@ -467,7 +463,6 @@ foreach ($devices as $device) {
                 $response = curl_exec($ch);
                 $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
                 $curl_error = curl_error($ch);
-                curl_close($ch);
 
                 if ($curl_error) {
                     throw new Exception("cURL error after retry: {$curl_error}");

@@ -300,8 +300,6 @@ class Applecare_helper
         $headers = substr($response, 0, $header_size);
         $body = substr($response, $header_size);
         
-        curl_close($ch);
-
         // Temporary logging for all fetches
         // error_log("AppleCare FETCH: Token generation - HTTP {$http_code}");
 
@@ -374,7 +372,6 @@ class Applecare_helper
         $device_header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
         $device_body = substr($device_response, $device_header_size);
         
-        curl_close($ch);
         $requests++;
 
         // Temporary logging for all fetches
@@ -432,7 +429,6 @@ class Applecare_helper
                         $mdm_response = curl_exec($mdm_ch);
                         $mdm_http_code = curl_getinfo($mdm_ch, CURLINFO_HTTP_CODE);
                         $mdm_curl_error = curl_error($mdm_ch);
-                        curl_close($mdm_ch);
                         $requests++;
                         
                         // Only process if successful (200) - 404 means no MDM server assigned
@@ -556,7 +552,6 @@ class Applecare_helper
         $headers = substr($response, 0, $header_size);
         $body = substr($response, $header_size);
         
-        curl_close($ch);
         $requests++;
 
         // Temporary logging for all fetches
@@ -582,7 +577,6 @@ class Applecare_helper
                 $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
                 $headers = substr($response, 0, $header_size);
                 $body = substr($response, $header_size);
-                curl_close($ch);
                 $requests++;
 
                 // Temporary logging for all fetches (retry)

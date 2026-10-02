@@ -802,13 +802,11 @@ class Applecare_controller extends Module_controller
         $response = curl_exec($ch);
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curl_error = curl_error($ch);
-        
+
         // Get headers to check for Retry-After
         $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
         $headers = substr($response, 0, $header_size);
         $body = substr($response, $header_size);
-        
-        curl_close($ch);
 
         // Temporary logging for all fetches
         // error_log("AppleCare FETCH: Token generation - HTTP {$http_code}");
